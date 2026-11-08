@@ -52,6 +52,50 @@
 #include "types.h"
 #include "common_rtl.h"
 #include "cpu_state.h"
+
+/* resume.sav, the in-game launcher's one-shot restart point, in the rollback
+ * format: the guest blob plus the execution residue (CPU registers, the
+ * interpreter's resume point, beam and APU pacing). A save state holds only
+ * the guest blob -- a load in a running session keeps the session's own CPU
+ * position, the game's idle loop, and that is why it works -- but the restart
+ * loads before the first frame, when there is no session: the frame driver
+ * booted from the reset vector over the state, and with only the resume point
+ * put back the CPU came up in emulation mode and ran off into BRKs (black
+ * picture over the stage's music). The file is written and read by the same
+ * executable and deleted once loaded; save-state slots keep their format, so
+ * every state a player already has keeps loading. */
+static bool SaveResumeState(const char *path) {
+  size_t cap = RtlRollbackSnapshotBound();
+  void *buf = cap ? malloc(cap) : NULL;
+  size_t n = buf ? RtlRollbackSaveToMemory(buf, cap) : 0;
+  bool ok = false;
+  if (n) {
+    FILE *f = fopen(path, "wb");
+    if (f) {
+      ok = fwrite(buf, 1, n, f) == n;
+      if (fclose(f)) ok = false;
+    }
+  }
+  free(buf);
+  return ok;
+}
+
+static bool LoadResumeState(const char *path) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+  bool ok = false;
+  if (!fseek(f, 0, SEEK_END)) {
+    long end = ftell(f);
+    if (end > 0 && !fseek(f, 0, SEEK_SET)) {
+      void *buf = malloc((size_t)end);
+      if (buf && fread(buf, 1, (size_t)end, f) == (size_t)end)
+        ok = RtlRollbackLoadFromMemory(buf, (size_t)end);
+      free(buf);
+    }
+  }
+  fclose(f);
+  return ok;
+}
 #include "cpu_trace.h"
 #include "common_cpu_infra.h"
 #include "snes/tier2_capture.h"
@@ -165,6 +209,7 @@ static int RemapSdlButton(int button);
 static void HandleGamepadInput(GamepadInfo *gi, int button, bool pressed);
 static void HandleInput(int keyCode, int keyMod, bool pressed);
 static void HandleCommand(uint32 j, bool pressed);
+static void LoadAudioInterpolation(void);
 static void PollKeyboardControls(const uint8_t *keys);
 static void RequestScreenshot(void);
 #ifndef __ANDROID__
@@ -657,6 +702,14 @@ static int RendererChoice(void) {
   if (!want[0])
     want = g_config.output_method == kOutputMethod_OpenGL ? "opengl" :
            g_config.output_method == kOutputMethod_SDLSoftware ? "software" : "auto";
+  /* GLSL presets render only on the OpenGL presenter, so a chosen shader
+   * wins over the renderer choice instead of being silently ignored. */
+  if (g_game && g_game->shader_supported && g_config.shader && g_config.shader[0] &&
+      strcmp(want, "opengl")) {
+    host_report_breadcrumb("renderer '%s' -> opengl: shader '%s' needs OpenGL",
+                           want, g_config.shader);
+    want = "opengl";
+  }
   for (int i = 0; i < g_renderer_count; ++i)
     if (!strcmp(g_renderer_id[i], want)) return i;
   if (strcmp(want, "auto"))
@@ -2866,6 +2919,38 @@ static void LauncherSeedRomCatalog(RecompLauncherCGameInfo *gi) {
 #endif
 
 #if defined(RECOMP_LAUNCHER)
+/* rom_patch.cfg sidecar (beside rom.cfg): the last prepared ROM-patch boot --
+ * line 1 the patch file that produced it, line 2 the prepared image. Lets
+ * SkipLauncher=1 honor an enabled patch without re-running the applier; a
+ * selection change or a missing prepared file falls back to the launcher. */
+static int RomPatchSidecarWrite(const char *patch_path, const char *prepared) {
+  char cfg[1024];
+  if (!snesrecomp_exe_dir_path("rom_patch.cfg", cfg, sizeof(cfg)))
+    snprintf(cfg, sizeof(cfg), "rom_patch.cfg");
+  FILE *f = fopen(cfg, "w");
+  if (!f) return 0;
+  int ok = fprintf(f, "%s\n%s\n", patch_path, prepared) >= 0;
+  if (fclose(f) != 0) ok = 0;
+  return ok;
+}
+static int RomPatchSidecarRead(char *patch_out, size_t patch_cap,
+                               char *prepared_out, size_t prepared_cap) {
+  char cfg[1024];
+  if (!snesrecomp_exe_dir_path("rom_patch.cfg", cfg, sizeof(cfg)))
+    snprintf(cfg, sizeof(cfg), "rom_patch.cfg");
+  FILE *f = fopen(cfg, "r");
+  if (!f) return 0;
+  char *a = fgets(patch_out, (int)patch_cap, f);
+  char *b = a ? fgets(prepared_out, (int)prepared_cap, f) : NULL;
+  fclose(f);
+  if (!a || !b) return 0;
+  for (char *p = patch_out; *p; ++p) if (*p == '\n' || *p == '\r') *p = 0;
+  for (char *p = prepared_out; *p; ++p) if (*p == '\n' || *p == '\r') *p = 0;
+  return patch_out[0] && prepared_out[0];
+}
+#endif /* RECOMP_LAUNCHER */
+
+#if defined(RECOMP_LAUNCHER)
 
 /* What the launcher opens on: the live settings, and what this host offers.
  * In session, netplay and Generate & rebuild are withheld -- the first would
@@ -2906,6 +2991,11 @@ static void LauncherSeed(RecompLauncherCSettings *ls, RecompLauncherCGameInfo *g
   for (int seat = 0; seat < RECOMP_LAUNCHER_MAX_PLAYERS; ++seat)
     ls->deadzone[seat] = (g_config.gamepad_deadzone * 100 + 32767 / 2) / 32767;
   ls->skip_launcher = g_config.skip_launcher;
+  /* Last session's ROM patch choice rides along: launcher_model_init clears
+   * it for a game that cannot patch, so seeding it unconditionally is safe. */
+  ls->rom_patch_enabled = g_config.rom_patch_enabled;
+  snprintf(ls->rom_patch_path, sizeof(ls->rom_patch_path), "%s",
+           g_config.rom_patch_path);
   ls->msu1_enabled  = 0;
   /* Display rows the framework host wires (see FrameBlendConfigure,
    * RendererApply, the vsync flags at presenter creation, and
@@ -3043,6 +3133,9 @@ static void LauncherCommit(const RecompLauncherCSettings *ls, const char *config
   }
   g_config.gamepad_deadzone    = (ls->deadzone[0] * 32767 + 50) / 100;
   g_config.skip_launcher       = ls->skip_launcher != 0;
+  g_config.rom_patch_enabled   = ls->rom_patch_enabled;
+  snprintf(g_config.rom_patch_path, sizeof(g_config.rom_patch_path), "%s",
+           ls->rom_patch_path);
   g_config.frame_blend         = ls->frame_blend != 0;
   g_config.run_ahead           = ls->run_ahead;
   if (game->rewind_settings) {
@@ -3243,7 +3336,7 @@ static void RunInGameLauncher(bool *running, const char **exit_reason) {
       if (same_rom &&
           snesrecomp_abspath("saves/resume.sav", g_relaunch.state,
                              sizeof(g_relaunch.state))) {
-        g_relaunch.with_state = RtlSaveSnapshot(g_relaunch.state);
+        g_relaunch.with_state = SaveResumeState(g_relaunch.state);
       }
       if (same_rom && !g_relaunch.with_state) {
         /* Restarting now would throw the player's progress away. The edit is
@@ -3500,6 +3593,8 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
    * digests the code was generated from. A 512-byte SMC copier header is
    * auto-stripped before hashing. */
   static char rom_path_buf[1024];
+  static char source_rom_buf[1024]; /* stock image the launcher verified; "" = rom_path_buf */
+  source_rom_buf[0] = ' ';
   {
     g_rom_identity_ok = DecodeRomIdentity(g_rom_sha256, &g_rom_crc32);
     int rom_resolved_by_launcher = 0;
@@ -3530,10 +3625,25 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
           FILE *probe = fopen(cached, "rb");
           if (probe) {
             fclose(probe);
+            /* rom.cfg names the STOCK image; it is also the mod catalog's
+             * commit target and (with a patch) the verified source. */
+            snprintf(source_rom_buf, sizeof(source_rom_buf), "%s", cached);
             snprintf(rom_path_buf, sizeof(rom_path_buf), "%s", cached);
             rom_resolved_by_launcher = 1;
             want_launcher = 0;
             host_report_breadcrumb("launcher skipped (SkipLauncher=1, cached rom)");
+            if (g_config.rom_patch_enabled && g_config.rom_patch_path[0]) {
+              char side_patch[512], prepared[1024];
+              if (RomPatchSidecarRead(side_patch, sizeof(side_patch),
+                                      prepared, sizeof(prepared)) &&
+                  strcmp(side_patch, g_config.rom_patch_path) == 0 &&
+                  (probe = fopen(prepared, "rb"))) {
+                fclose(probe);
+                snprintf(rom_path_buf, sizeof(rom_path_buf), "%s", prepared);
+                host_report_breadcrumb(
+                    "launcher skipped: booting patched image %s", prepared);
+              }
+            }
           }
         }
       }
@@ -3598,7 +3708,21 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
           }
 #endif
           if (rom_path_buf[0]) {
-            snesrecomp_rom_cache_write(rom_path_buf);
+            /* A ROM patch returns the prepared image in rom_path_buf; the
+             * stock file it was verified against stays in
+             * ls.rom_patch_source_path. Persist the SOURCE in rom.cfg (the
+             * patched image is a regenerable cache entry, and the mod catalog
+             * targets the stock digest) while the patched path still boots. */
+            if (ls.rom_patch_enabled && ls.rom_patch_source_path[0]) {
+              snprintf(source_rom_buf, sizeof(source_rom_buf), "%s",
+                       ls.rom_patch_source_path);
+              snesrecomp_rom_cache_write(source_rom_buf);
+              if (ls.rom_patch_path[0] &&
+                  strcmp(rom_path_buf, source_rom_buf) != 0)
+                RomPatchSidecarWrite(ls.rom_patch_path, rom_path_buf);
+            } else {
+              snesrecomp_rom_cache_write(rom_path_buf);
+            }
             rom_resolved_by_launcher = 1;
           } else {
             /* PLAY is gated on a verified ROM, so LAUNCH without one is a
@@ -3673,7 +3797,10 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc, char **ar
   /* Resolve the enabled features against THIS ROM and persist the plan. A
    * rejected plan (wrong ROM for a package, a plugin nothing registered) is a
    * refusal, not a silent fallback. */
-  if (g_mods_ready && !snes_mod_runtime_commit_c(rom_path_buf)) {
+  /* The mod catalog targets the stock ROM digest: validate THAT, not the
+   * prepared patched image (which a commit of rom_path_buf would reject). */
+  const char *commit_rom = source_rom_buf[0] ? source_rom_buf : rom_path_buf;
+  if (g_mods_ready && !snes_mod_runtime_commit_c(commit_rom)) {
     fprintf(stderr, "mods: plan rejected: %s\n", snes_mod_runtime_last_error_c());
     return 1;
   }
@@ -3986,7 +4113,7 @@ error_reading:;
    * setting a live session cannot take, and saved the moment it left. The
    * file is one-shot -- a later plain launch must not resume it again. */
   if (args.resume_state) {
-    bool resumed = RtlLoadSnapshot(args.resume_state);
+    bool resumed = LoadResumeState(args.resume_state);
     if (resumed) GameReset();
     host_report_breadcrumb("resume state %s: %s", resumed ? "loaded" : "FAILED to load (kept)",
                            args.resume_state);
@@ -4048,6 +4175,7 @@ error_reading:;
     const char *v = HostGetenv("OSD_FPS");
     if ((v && atoi(v)) || g_config.display_perf_title) snes_osd_set_fps_visible(1);
   }
+  LoadAudioInterpolation();
   g_state_generation = RtlStateGeneration();
 
   snes_savestate_menu_set_compose(ComposeStateThumbnail);
@@ -4797,10 +4925,45 @@ static void HandleCommand(uint32 j, bool pressed) {
   }
 }
 
+/* Output interpolation (snes/dsp.h): I cycles Gaussian -> Cubic -> Sinc,
+ * and the choice is kept in audio_interpolation.txt beside the game.
+ * SNESRECOMP_AUDIO_INTERP=0..2 overrides it for one run. */
+#define kAudioInterpFile "audio_interpolation.txt"
+
+static void LoadAudioInterpolation(void) {
+  int mode = kDspInterp_Gaussian;
+  const char *v = HostGetenv("AUDIO_INTERP");
+  if (v) {
+    mode = atoi(v);
+  } else {
+    FILE *f = fopen(kAudioInterpFile, "r");
+    if (f) {
+      if (fscanf(f, "%d", &mode) != 1) mode = kDspInterp_Gaussian;
+      fclose(f);
+    }
+  }
+  dsp_set_interpolation(mode);
+}
+
+static void CycleAudioInterpolation(void) {
+  int mode = (dsp_get_interpolation() + 1) % kDspInterp_Count;
+  dsp_set_interpolation(mode);
+  FILE *f = fopen(kAudioInterpFile, "w");
+  if (f) {
+    fprintf(f, "%d\n", mode);
+    fclose(f);
+  }
+  char msg[64];
+  snprintf(msg, sizeof(msg), "Audio: %s", dsp_interpolation_name(mode));
+  snes_osd_push(msg, 2500);
+}
+
 static void HandleInput(int keyCode, int keyMod, bool pressed) {
   int j = FindCmdForSdlKey(keyCode, (SDL_Keymod)keyMod);
   if (j != 0)
     HandleCommand(j, pressed);
+  else if (pressed && keyCode == SDLK_i)
+    CycleAudioInterpolation();
 }
 
 static void RequestScreenshot(void) {
