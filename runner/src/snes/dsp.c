@@ -1,4 +1,5 @@
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +64,72 @@ const uint16_t gaussValues[512] = {
   0x502, 0x503, 0x504, 0x506, 0x507, 0x508, 0x50A, 0x50B, 0x50C, 0x50D, 0x50E, 0x50F, 0x510, 0x511, 0x511, 0x512,
   0x513, 0x514, 0x514, 0x515, 0x516, 0x516, 0x517, 0x517, 0x517, 0x518, 0x518, 0x518, 0x518, 0x518, 0x519, 0x519
 };
+
+/* Output interpolation (presentation only, see dsp.h). One canonical Dsp
+ * reaches the speakers, so its re-interpolated voices live here rather than
+ * in Dsp, whose saveload region and netplay digest must not change. */
+static int s_interp = kDspInterp_Gaussian;
+static int s_interpOut[8];           /* voice output, envelope applied */
+static int16_t s_prevBlock[8][19];   /* decodeBuffer before the last BRR decode */
+static float s_lanczos[256][8];
+static bool s_lanczosReady;
+
+static const char *const kInterpNames[kDspInterp_Count] = {
+  "Gaussian (hardware)", "Cubic", "Sinc (Lanczos)",
+};
+
+void dsp_set_interpolation(int mode) {
+  if (mode < 0 || mode >= kDspInterp_Count) mode = kDspInterp_Gaussian;
+  if (mode == kDspInterp_Sinc && !s_lanczosReady) {
+    for (int p = 0; p < 256; p++) {
+      float t = p / 256.0f, sum = 0.0f;
+      for (int k = 0; k < 8; k++) {
+        /* Taps n-4..n+3 around a position between n-1 and n. */
+        float x = (float)(k - 3) - t, w = 1.0f;
+        if (x != 0.0f) {
+          float px = 3.14159265f * x;
+          w = (sinf(px) / px) * (sinf(px / 4.0f) / (px / 4.0f));
+        }
+        s_lanczos[p][k] = w;
+        sum += w;
+      }
+      for (int k = 0; k < 8; k++) s_lanczos[p][k] /= sum;
+    }
+    s_lanczosReady = true;
+  }
+  if (mode != s_interp) memset(s_prevBlock, 0, sizeof(s_prevBlock));
+  s_interp = mode;
+}
+
+int dsp_get_interpolation(void) { return s_interp; }
+
+const char *dsp_interpolation_name(int mode) {
+  return mode >= 0 && mode < kDspInterp_Count ? kInterpNames[mode] : "?";
+}
+
+static int16_t interp_sample(Dsp *dsp, int ch, int sampleNum, int offset) {
+  const int16_t *buf = dsp->channel[ch].decodeBuffer;
+  float t = offset / 256.0f, out;
+  if (s_interp == kDspInterp_Cubic) {
+    /* Same segment the Gaussian walks: buf[n+1] -> buf[n+2]. */
+    float p0 = buf[sampleNum], p1 = buf[sampleNum + 1];
+    float p2 = buf[sampleNum + 2], p3 = buf[sampleNum + 3];
+    out = 0.5f * (2.0f * p1 + (p2 - p0) * t +
+                  (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * t * t +
+                  (3.0f * (p1 - p2) + p3 - p0) * t * t * t);
+  } else {
+    /* Eight taps need samples beyond buf[n+3]; walk buf[n-1] -> buf[n]
+     * instead, reaching back into the previous block. */
+    const float *w = s_lanczos[offset];
+    out = 0.0f;
+    for (int k = 0; k < 8; k++) {
+      int i = sampleNum - 4 + k;
+      out += w[k] * (i >= 0 ? buf[i] : s_prevBlock[ch][i + 16]);
+    }
+  }
+  int s = (int)(out >= 0.0f ? out + 0.5f : out - 0.5f);
+  return s < -0x4000 ? -0x4000 : (s > 0x3fff ? 0x3fff : s);
+}
 
 static void dsp_cycleChannel(Dsp* dsp, int ch);
 static void dsp_handleEcho(Dsp* dsp, int* outputL, int* outputR, bool audit,
@@ -258,13 +325,15 @@ void dsp_cycle(Dsp* dsp) {
   int echoL = 0, echoR = 0;
   for(int i = 0; i < 8; i++) {
     dsp_cycleChannel(dsp, i);
+    /* The dry bus is what the speakers hear; echo RAM stays canonical. */
+    int heard = s_interp == kDspInterp_Gaussian ? dsp->channel[i].sampleOut : s_interpOut[i];
 #if SNESRECOMP_DSP_NATIVE_MIX
     /* A voice's scaled contribution is shared by the dry and echo buses.
      * Accumulate each bus in voice order, with its original saturation. */
     int left = (dsp->channel[i].sampleOut * dsp->channel[i].volumeL) >> 6;
     int right = (dsp->channel[i].sampleOut * dsp->channel[i].volumeR) >> 6;
-    totalL += left;
-    totalR += right;
+    totalL += (heard * dsp->channel[i].volumeL) >> 6;
+    totalR += (heard * dsp->channel[i].volumeR) >> 6;
     if (dsp->channel[i].echoEnable) {
       echoL += left;
       echoR += right;
@@ -272,8 +341,8 @@ void dsp_cycle(Dsp* dsp) {
       echoR = echoR < -0x8000 ? -0x8000 : (echoR > 0x7fff ? 0x7fff : echoR);
     }
 #else
-    totalL += (dsp->channel[i].sampleOut * dsp->channel[i].volumeL) >> 6;
-    totalR += (dsp->channel[i].sampleOut * dsp->channel[i].volumeR) >> 6;
+    totalL += (heard * dsp->channel[i].volumeL) >> 6;
+    totalR += (heard * dsp->channel[i].volumeR) >> 6;
 #endif
     totalL = totalL < -0x8000 ? -0x8000 : (totalL > 0x7fff ? 0x7fff : totalL); // clamp 16-bit
     totalR = totalR < -0x8000 ? -0x8000 : (totalR > 0x7fff ? 0x7fff : totalR); // clamp 16-bit
@@ -408,14 +477,18 @@ static void dsp_cycleChannel(Dsp* dsp, int ch) {
   int newCounter = dsp->channel[ch].pitchCounter + pitch;
   if(newCounter > 0xffff) {
     // next sample
+    if (s_interp == kDspInterp_Sinc)
+      memcpy(s_prevBlock[ch], dsp->channel[ch].decodeBuffer, sizeof(s_prevBlock[ch]));
     dsp_decodeBrr(dsp, ch);
   }
   dsp->channel[ch].pitchCounter = newCounter;
-  int16_t sample = 0;
+  int16_t sample = 0, heard = 0;
   if(dsp->channel[ch].useNoise) {
-    sample = dsp->noiseSample;
+    sample = heard = dsp->noiseSample;
   } else {
     sample = dsp_getSample(dsp, ch, dsp->channel[ch].pitchCounter >> 12, (dsp->channel[ch].pitchCounter >> 4) & 0xff);
+    heard = s_interp == kDspInterp_Gaussian ? sample :
+            interp_sample(dsp, ch, dsp->channel[ch].pitchCounter >> 12, (dsp->channel[ch].pitchCounter >> 4) & 0xff);
   }
   // Key-on/off is LATCHED and polled every other sample, KOF taking
   // priority — hardware behavior (and what the snes9x oracle does).
@@ -439,6 +512,7 @@ static void dsp_cycleChannel(Dsp* dsp, int ch) {
       dsp->channel[ch].decodeOffset = dsp->apu_ram[samplePointer];
       dsp->channel[ch].decodeOffset |= dsp->apu_ram[(samplePointer + 1) & 0xffff] << 8;
       memset(dsp->channel[ch].decodeBuffer, 0, sizeof(dsp->channel[ch].decodeBuffer));
+      memset(s_prevBlock[ch], 0, sizeof(s_prevBlock[ch]));
       dsp->channel[ch].gain = 0;
       // Key-on always enters the ATTACK stage; whether the envelope VALUE
       // follows ADSR or the GAIN program is decided live per tick (the
@@ -489,6 +563,7 @@ static void dsp_cycleChannel(Dsp* dsp, int ch) {
   sample = (sample * dsp->channel[ch].gain) >> 11;
   dsp->ram[(ch << 4) | 9] = sample >> 7;
   dsp->channel[ch].sampleOut = sample;
+  s_interpOut[ch] = (heard * dsp->channel[ch].gain) >> 11;
 }
 
 static void dsp_handleGain(Dsp* dsp, int ch, bool liveGain) {

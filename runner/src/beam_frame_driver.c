@@ -115,6 +115,15 @@ static void run_interrupt(uint32_t vector, uint64_t deadline) {
 }
 
 void snes_beam_frame_driver_run_frame(void) {
+  /* The interpreter's resume point is part of a save state (the rollback
+   * residue); this driver's copy is not. After a state load -- above all one
+   * made before the first frame, as when the in-game launcher restarts the
+   * game to apply a renderer change and resumes from resume.sav -- this copy
+   * still held 0, so the frame "booted" from the reset vector over the loaded
+   * state and the game started again from power-on. Between frames the two
+   * are equal (update_resume_pc), so taking the interpreter's value here only
+   * changes a frame that follows a load. */
+  update_resume_pc();
   const bool booting = s_resume_pc == 0;
   int slices = 0;
   uint64_t frame_end;
@@ -152,6 +161,10 @@ void snes_beam_frame_driver_run_frame(void) {
     s_wai_halted = false;
     run_interrupt(nmi_vector(), frame_end);
     g_snes->inNmi = false;
+    /* A handler that never returns (it reset S and fell into the idle loop)
+     * yields at that loop's WAI: the CPU is halted until the next interrupt. */
+    if (interp_bridge_lle_took_wai())
+      s_wai_halted = true;
   }
 
   /* Run out the field, taking each interrupt at the beam position it latches
@@ -245,10 +258,25 @@ void snes_beam_frame_driver_draw_ppu_frame_observed(
    * the beam must not also step it from inside guest register writes. */
   snes_set_hdma_beam_enabled(g_snes, false);
   ppu_rasterRenderBegin(g_ppu);
+  /* Writes made in vblank (beam lines 225..261) are in force from V=0, and so
+   * is a $420C written there: hardware initializes those HDMA channels at V=0
+   * and transfers before line 1. Taking that $420C only at line 1 left the
+   * channels loading their table header through lines 1-2, which then drew
+   * with the previous field's end-of-frame registers (Super Mario Kart turns
+   * HDMA off at line 220 and back on in vblank: road on the top two lines). */
+  ppu_rasterApplyLine(g_ppu, 261);
+  {
+    uint8_t vblank_hdmaen;
+    if (ppu_rasterTakeHdmaen(&vblank_hdmaen))
+      dma_startDma(g_snes->dma, vblank_hdmaen, true);
+  }
   dma_initHdma(g_snes->dma);
-  /* Hardware's V=0 init also performs each channel's first transfer before
-   * any visible pixel. */
-  dma_primeHdmaFirstLine(g_snes->dma);
+  /* The first transfer happens in V=0's H-blank and counts as a table line,
+   * as on every later line (bsnes hdmaRun runs for V=0..224). Writing it
+   * without counting it put every split one line late: Donkey Kong Country
+   * 2's island map changes its palette and its TM/TS on the same table line,
+   * and the late TM/TS drew a bright line across the screen. */
+  dma_doHdma(g_snes->dma);
   for (line = 1; line <= 224; line++) {
     uint8_t hdmaen;
     /* A split is written in H-blank after its line is drawn, so the previous

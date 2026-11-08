@@ -912,6 +912,13 @@ static void PpuRunLineJob(Ppu* ppu, int line, bool pixels, bool live) {
     ppu->timeOver = false;
     ppu->evenFrame = !ppu->evenFrame;
   } else {
+    /* Frame-model hosts render lines 1..224 and never pass line 0, so the
+     * mosaic table was never built and stayed all zeros: every line of a
+     * mosaic-enabled layer sampled row 0. Street Fighter II Turbo leaves BG1
+     * mosaic enabled at size 1 after its title animation, and its Mode 7
+     * logo vanished. Rebuilding is a no-op unless the size changed, so a
+     * $2106 write between lines takes effect from the next line too. */
+    PpuPrepareMosaic(ppu);
     PpuDrawVisibleLine(ppu, line, pixels, live);
   }
 }
@@ -1509,8 +1516,13 @@ static void PpuCaptureBackground_4bpp(Ppu *ppu, uint y, bool sub, uint layer) {
 
 /* Modes 2/4/6 use BG3's tilemap as per-column scroll overrides for the
  * displayed layers.  Mode 2 (the Star Fox attract/game perspective screens)
- * has separate horizontal and vertical rows: BG3VOFS-1 selects the horizontal
- * row and BG3VOFS+7 the vertical row.  Bit 13 enables BG1, bit 14 enables BG2.
+ * has separate horizontal and vertical rows: the row at BG3VOFS holds the
+ * horizontal offsets and the row at BG3VOFS+8 the vertical ones, as on
+ * hardware (bsnes fetches them at BG3VOFS+0 and +8). The rows used to be read
+ * at BG3VOFS-1 and +7, which is the same row unless BG3VOFS is a multiple of
+ * 8: Yoshi's Island's World 1-7 sets BG3VOFS to 128, so its horizontal row
+ * ($2000: BG1, offset 0) was taken as BG1's vertical offset and the stage was
+ * drawn from the wrong tilemap rows.  Bit 13 enables BG1, bit 14 enables BG2.
  * The first visible tile column cannot be offset on hardware. */
 static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
                                       PpuZbufType zhi, PpuZbufType zlo) {
@@ -1545,7 +1557,7 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
   const unsigned hscroll = ppu->hScroll[layer];
   const unsigned vscroll = ppu->vScroll[layer];
   const unsigned opt_hscroll = ppu->hScroll[2];
-  const unsigned opt_vscroll = ppu->vScroll[2] - 1u;
+  const unsigned opt_vscroll = ppu->vScroll[2];
   const int opt_hrow = (opt_vscroll & opt_coord_mask) >> opt_shift;
   const int opt_vrow = ((opt_vscroll + 8) & opt_coord_mask) >> opt_shift;
   const uint16 enable = (uint16)(0x2000u << layer);
@@ -1577,7 +1589,7 @@ static void PpuDrawBackground_4bpp_opt(Ppu *ppu, uint y, bool sub, uint layer,
         if (hcell & enable)
           hoffset = (hcell & ~7) | (hscroll & 7);
         if (vcell & enable)
-          voffset = (uint16)(vcell + 1);
+          voffset = vcell;  /* bsnes: voffset = y + vlookup, no +1 */
       }
 
       const unsigned sx =
@@ -3259,6 +3271,27 @@ void ppu_set_vram_write_log_hook(PpuVramWriteLogHook hook) {
 /* key: beam position within the field, monotonic from its start at V=225
  * (0) through vblank (36 = V=261) and the visible lines (37 = V=0 ...). */
 typedef struct { uint16_t key; uint16_t reg; uint8_t val; } PpuRasterEntry;
+/* OAM contents from a beam position on. A game may rewrite OAM mid-field in
+ * forced blank -- Super Mario Kart uploads a second 544-byte table at its
+ * screen split -- and the renderer, which runs after the CPU half, would
+ * otherwise draw every line with the table left at the end of the field. */
+#define PPU_RASTER_OAM_MAX 8
+typedef struct {
+  uint16_t key;
+  uint16_t oam[0x100];
+  uint8_t highOam[0x20];
+} PpuRasterOam;
+/* CGRAM contents from a beam position on, kept the same way. A game may
+ * reload palettes mid-field: Kirby Super Star's IRQ at line 168 DMAs the HUD
+ * palettes over BG palettes 0-7 for the status bar, and its NMI puts the
+ * stage palettes back. Drawn with the CGRAM left at the end of the field, the
+ * whole stage took the HUD's colors. HDMA writes are not recorded here: the
+ * render loop replays HDMA itself. */
+#define PPU_RASTER_CG_MAX 8
+typedef struct {
+  uint16_t key;
+  uint16_t cgram[0x100];
+} PpuRasterCg;
 typedef struct {
   uint8_t regs[PPU_SAVESTATE_REGS_SIZE];   /* inidisp..cgwsel at field start */
   uint8_t scrollPrev, scrollPrev2, m7prev;
@@ -3266,6 +3299,17 @@ typedef struct {
   int count;
   uint32_t dropped;
   PpuRasterEntry e[PPU_RASTER_MAX];
+  uint16_t oamBase[0x100];                 /* OAM at field start */
+  uint8_t highOamBase[0x20];
+  int oamCount;
+  int oamOpen;                             /* last snapshot still filling */
+  uint32_t oamDropped;
+  PpuRasterOam oamSnap[PPU_RASTER_OAM_MAX];
+  uint16_t cgBase[0x100];                  /* CGRAM at field start */
+  int cgCount;
+  int cgOpen;
+  uint32_t cgDropped;
+  PpuRasterCg cgSnap[PPU_RASTER_CG_MAX];
 } PpuRasterField;
 static PpuRasterField s_field[2];
 static int s_raster_cur;             /* recording; the other is completed */
@@ -3279,6 +3323,44 @@ static int s_raster_hdmaen_pending;
 static struct {
   uint8_t oamAdr, oamInHigh, oamSecondWrite, oamBuffer;
 } s_raster_port;
+static int s_raster_oam_next;
+static uint16_t s_raster_live_oam[0x100];  /* the guest's OAM during a render */
+/* VRAM as the completed field left it. The CPU half can run past V=225 before
+ * the field is drawn, and the next field's NMI uploads land in VRAM then.
+ * Register writes made there are kept apart by the journal; VRAM writes were
+ * not, so the field was drawn with the next field's VRAM under its own
+ * scroll registers. Yoshi's Island's World 1-7 uploads its offset-per-tile
+ * table in that NMI: the coarse scroll came from the next frame and the fine
+ * scroll from this one, and the stage jumped 8 pixels back and forth while
+ * Yoshi walked. The first VRAM write after the boundary saves the field's
+ * VRAM; the render draws from that copy. */
+static int s_raster_overrun;           /* boundary passed, field not drawn yet */
+static int s_raster_vram_saved;
+static uint16_t s_raster_field_vram[0x8000];
+/* OAM and CGRAM at the same boundary, so sprites and palettes stay with the
+ * tiles they were uploaded with (the next NMI also uploads OAM and CGRAM). */
+static uint16_t s_raster_field_oam[0x100];
+static uint8_t s_raster_field_high_oam[0x20];
+static uint16_t s_raster_field_cgram[0x100];
+/* VRAM writes made while the picture is drawn (keys 37.., V=0..224), one log
+ * per field. On hardware those writes (in forced blank) only reach the lines
+ * after them; the renderer runs after the CPU half, so without the log every
+ * line was drawn with the VRAM left at the end of the field. Yoshi's Island
+ * uploads World 1-7's offset-per-tile table at line 217 and Yoshi's tiles at
+ * line 221; the render starts from the VRAM as it stood at line 0 and replays
+ * each write from its own line. */
+#define PPU_RASTER_VLOG_MAX 0x8000
+typedef struct { uint16_t key, addr, oldv, newv; } PpuRasterVramWrite;
+static PpuRasterVramWrite s_raster_vlog[2][PPU_RASTER_VLOG_MAX];
+static int s_raster_vlog_count[2];
+static int s_raster_vlog_dropped[2];
+static int s_raster_vlog_next;
+static const PpuRasterVramWrite *s_raster_vlog_render;
+static int s_raster_vlog_render_count;
+static uint16_t s_raster_render_vram[0x8000];
+static uint8_t s_raster_live_high_oam[0x20];
+static int s_raster_cg_next;
+static uint16_t s_raster_live_cgram[0x100]; /* the guest's CGRAM during a render */
 
 /* Only the machine's PPU journals: the debug server and a few tools run
  * ppu_write on scratch copies. */
@@ -3288,6 +3370,20 @@ static Ppu *raster_machine_ppu(void) {
 
 static uint16_t raster_key(uint16_t line) {
   return (uint16_t)(line >= 225 ? line - 225 : line + (262 - 225));
+}
+
+/* The beam line a display write is filed under. The renderer applies a line's
+ * writes before drawing the next one. A write in the first half of a visible
+ * line (before dot 150, master clock 600) reaches most of it on hardware, so
+ * it is filed with the previous line (SMK's split IRQ lands its force-blank
+ * write either side of line 107/108; filed by line alone, those flickered).
+ * Never across the field boundary: V=225 opens a new field, and filing its
+ * NMI writes as line 224 would apply them only after that field is drawn. */
+static uint16_t raster_write_line(void) {
+  const uint16_t v = g_snes->vPos;
+  if (g_snes->hPos < 600u && v != 225u)
+    return v ? (uint16_t)(v - 1) : 261u;
+  return v;
 }
 
 static int raster_reg_journaled(uint16_t reg) {
@@ -3314,6 +3410,81 @@ static void raster_snapshot(PpuRasterField *f, const Ppu *ppu) {
   f->hdmaen = g_snesrecomp_last_hdmaen;
   f->count = 0;
   f->dropped = 0;
+  memcpy(f->oamBase, ppu->oam, sizeof(f->oamBase));
+  memcpy(f->highOamBase, ppu->highOam, sizeof(f->highOamBase));
+  f->oamCount = 0;
+  f->oamOpen = 0;
+  f->oamDropped = 0;
+  memcpy(f->cgBase, ppu->cgram, sizeof(f->cgBase));
+  f->cgCount = 0;
+  f->cgOpen = 0;
+  f->cgDropped = 0;
+}
+
+static void raster_cg_close(PpuRasterField *f, const Ppu *ppu) {
+  if (!f->cgOpen) return;
+  memcpy(f->cgSnap[f->cgCount - 1].cgram, ppu->cgram, sizeof(ppu->cgram));
+  f->cgOpen = 0;
+}
+
+/* Called before every CGDATA write, like raster_oam_note_write. */
+static void raster_cg_note_write(Ppu *ppu) {
+  PpuRasterField *f;
+  uint16_t key;
+  if (s_guest_scope) return;
+  if (!s_raster_armed || s_raster_rendering || ppu != raster_machine_ppu())
+    return;
+  if (g_ppu_wlog_src == kPpuWlogReplay || g_ppu_wlog_src == kPpuWlogHdma)
+    return;
+  f = &s_field[s_raster_cur];
+  key = raster_key(raster_write_line());
+  if (f->cgOpen && f->cgSnap[f->cgCount - 1].key == key)
+    return;
+  raster_cg_close(f, ppu);
+  if (f->cgCount >= PPU_RASTER_CG_MAX) {
+    f->cgDropped++;
+    f->cgSnap[f->cgCount - 1].key = key;
+  } else {
+    f->cgSnap[f->cgCount++].key = key;
+  }
+  f->cgOpen = 1;
+}
+
+/* The snapshot being filled holds whatever the guest has written since it
+ * opened: freeze it with the OAM as it stands now. */
+static void raster_oam_close(PpuRasterField *f, const Ppu *ppu) {
+  PpuRasterOam *s;
+  if (!f->oamOpen) return;
+  s = &f->oamSnap[f->oamCount - 1];
+  memcpy(s->oam, ppu->oam, sizeof(s->oam));
+  memcpy(s->highOam, ppu->highOam, sizeof(s->highOam));
+  f->oamOpen = 0;
+}
+
+/* Called before every OAMDATA write. A write on a new beam line starts a new
+ * snapshot; the previous one is complete, since OAM has not changed since. */
+static void raster_oam_note_write(Ppu *ppu) {
+  PpuRasterField *f;
+  uint16_t key;
+  if (s_guest_scope) return;
+  if (!s_raster_armed || s_raster_rendering || ppu != raster_machine_ppu())
+    return;
+  if (g_ppu_wlog_src == kPpuWlogReplay)
+    return;
+  f = &s_field[s_raster_cur];
+  key = raster_key(raster_write_line());
+  if (f->oamOpen && f->oamSnap[f->oamCount - 1].key == key)
+    return;
+  raster_oam_close(f, ppu);
+  if (f->oamCount >= PPU_RASTER_OAM_MAX) {
+    /* Out of slots: fold this burst into the last one. Its key moves later,
+     * so earlier lines lose that table rather than show the wrong one. */
+    f->oamDropped++;
+    f->oamSnap[f->oamCount - 1].key = key;
+  } else {
+    f->oamSnap[f->oamCount++].key = key;
+  }
+  f->oamOpen = 1;
 }
 
 void ppu_rasterBegin(Ppu *ppu) {
@@ -3334,14 +3505,46 @@ void ppu_rasterFieldBoundary(void) {
   if (!s_raster_armed || !ppu)
     return;
   s_raster_rendering = 0;
+  raster_oam_close(&s_field[s_raster_cur], ppu);
+  raster_cg_close(&s_field[s_raster_cur], ppu);
   s_raster_cur ^= 1;
   s_raster_have_completed = 1;
+  s_raster_overrun = 1;
+  s_raster_vram_saved = 0;
+  s_raster_vlog_count[s_raster_cur] = 0;
+  s_raster_vlog_dropped[s_raster_cur] = 0;
+  memcpy(s_raster_field_oam, ppu->oam, sizeof(s_raster_field_oam));
+  memcpy(s_raster_field_high_oam, ppu->highOam, sizeof(s_raster_field_high_oam));
+  memcpy(s_raster_field_cgram, ppu->cgram, sizeof(s_raster_field_cgram));
   raster_snapshot(&s_field[s_raster_cur], ppu);
+}
+
+static void raster_vram_note_write(Ppu *ppu) {
+  if (s_guest_scope || !s_raster_armed || s_raster_rendering) return;
+  if (!s_raster_overrun || s_raster_vram_saved) return;
+  if (ppu != raster_machine_ppu() || g_ppu_wlog_src == kPpuWlogReplay) return;
+  memcpy(s_raster_field_vram, ppu->vram, sizeof(s_raster_field_vram));
+  s_raster_vram_saved = 1;
+}
+
+static void raster_vram_log(Ppu *ppu, uint16_t addr, uint16_t oldv, uint16_t newv) {
+  int c;
+  uint16_t key;
+  if (s_guest_scope || !s_raster_armed || s_raster_rendering) return;
+  if (ppu != raster_machine_ppu() || g_ppu_wlog_src == kPpuWlogReplay) return;
+  key = raster_key(raster_write_line());
+  if (key < 37) return;                 /* vblank: in force from line 0 */
+  c = s_raster_cur;
+  if (s_raster_vlog_count[c] >= PPU_RASTER_VLOG_MAX) { s_raster_vlog_dropped[c] = 1; return; }
+  s_raster_vlog[c][s_raster_vlog_count[c]++] = (PpuRasterVramWrite){ key, addr, oldv, newv };
 }
 
 void ppu_rasterReset(void) {
   if(s_guest_scope)return;
   s_raster_armed = 0;
+  s_raster_vlog_count[0] = s_raster_vlog_count[1] = 0;
+  s_raster_overrun = 0;
+  s_raster_vram_saved = 0;
   s_raster_have_completed = 0;
   s_raster_rendering = 0;
   s_raster_render = NULL;
@@ -3392,6 +3595,59 @@ void ppu_rasterRenderBegin(Ppu *ppu) {
   ppu->scrollPrev = f->scrollPrev;
   ppu->scrollPrev2 = f->scrollPrev2;
   ppu->m7prev = f->m7prev;
+  /* Draw with the field's own OAM history; the guest's OAM comes back at
+   * ppu_rasterRenderEnd. Only a screen split needs it: a table rewritten
+   * mid-picture (before line 200, key 237) for the lines below it. VRAM is
+   * not journaled, so the sprite tiles are always the live ones, and the
+   * live OAM is the table uploaded with them. A rewrite in vblank or at the
+   * bottom of the picture is the next frame's upload: Yoshi's Island starts
+   * it at line 221, Yoshi's tiles included, and drawing the field above it
+   * with the older table under the new tiles mixed two animation frames
+   * (extra heads, stray body parts whenever Yoshi moved). */
+  memcpy(s_raster_live_oam, ppu->oam, sizeof(s_raster_live_oam));
+  memcpy(s_raster_live_high_oam, ppu->highOam, sizeof(s_raster_live_high_oam));
+  s_raster_oam_next = f->oamCount;
+  /* With VRAM journaled per line (see s_raster_vlog) the sprite tiles of each
+   * line are those of its own moment, so the OAM history applies to every
+   * field that rewrote OAM, not only to a screen split. */
+  if (f->oamCount) {
+    memcpy(ppu->oam, f->oamBase, sizeof(f->oamBase));
+    memcpy(ppu->highOam, f->highOamBase, sizeof(f->highOamBase));
+    s_raster_oam_next = 0;
+  }
+  if (s_raster_vram_saved && s_raster_have_completed && !ppu->renderVram)
+    ppu->renderVram = s_raster_field_vram;
+  s_raster_vlog_render = NULL;
+  s_raster_vlog_render_count = 0;
+  s_raster_vlog_next = 0;
+  {
+    const int c = s_raster_have_completed ? (s_raster_cur ^ 1) : s_raster_cur;
+    if (s_raster_vlog_count[c] && !s_raster_vlog_dropped[c] &&
+        (!ppu->renderVram || ppu->renderVram == s_raster_field_vram)) {
+      const PpuRasterVramWrite *L = s_raster_vlog[c];
+      memcpy(s_raster_render_vram, PpuRenderVram(ppu), sizeof(s_raster_render_vram));
+      for (int i = s_raster_vlog_count[c] - 1; i >= 0; i--)
+        s_raster_render_vram[L[i].addr] = L[i].oldv;
+      ppu->renderVram = s_raster_render_vram;
+      s_raster_vlog_render = L;
+      s_raster_vlog_render_count = s_raster_vlog_count[c];
+    }
+  }
+  /* The guest's OAM and CGRAM come back at ppu_rasterRenderEnd. A field
+   * that rewrote them draws from its history; one that did not draws with
+   * them as they stood at its end, not with what the next field's NMI has
+   * uploaded since (s_raster_overrun). */
+  memcpy(s_raster_live_cgram, ppu->cgram, sizeof(s_raster_live_cgram));
+  s_raster_cg_next = 0;
+  if (s_raster_overrun && s_raster_have_completed &&
+      s_raster_oam_next == f->oamCount) {
+    memcpy(ppu->oam, s_raster_field_oam, sizeof(s_raster_field_oam));
+    memcpy(ppu->highOam, s_raster_field_high_oam, sizeof(s_raster_field_high_oam));
+  }
+  if (f->cgCount)
+    memcpy(ppu->cgram, f->cgBase, sizeof(f->cgBase));
+  else if (s_raster_overrun && s_raster_have_completed)
+    memcpy(ppu->cgram, s_raster_field_cgram, sizeof(s_raster_field_cgram));
   s_raster_render = f;
   s_raster_next = 0;
   s_raster_hdmaen_pending = 0;
@@ -3429,6 +3685,22 @@ void ppu_rasterApplyLine(Ppu *ppu, int line) {
     }
     s_raster_next++;
   }
+  while (s_raster_vlog_next < s_raster_vlog_render_count &&
+         s_raster_vlog_render[s_raster_vlog_next].key <= limit) {
+    const PpuRasterVramWrite *w = &s_raster_vlog_render[s_raster_vlog_next++];
+    s_raster_render_vram[w->addr] = w->newv;
+  }
+  while (s_raster_oam_next < f->oamCount &&
+         f->oamSnap[s_raster_oam_next].key <= limit) {
+    const PpuRasterOam *s = &f->oamSnap[s_raster_oam_next++];
+    memcpy(ppu->oam, s->oam, sizeof(s->oam));
+    memcpy(ppu->highOam, s->highOam, sizeof(s->highOam));
+  }
+  while (s_raster_cg_next < f->cgCount &&
+         f->cgSnap[s_raster_cg_next].key <= limit) {
+    const PpuRasterCg *s = &f->cgSnap[s_raster_cg_next++];
+    memcpy(ppu->cgram, s->cgram, sizeof(s->cgram));
+  }
 }
 
 /* The render reconstructed the completed field. Writes the guest has made
@@ -3451,6 +3723,16 @@ void ppu_rasterRenderEnd(Ppu *ppu) {
   ppu->oamInHigh = s_raster_port.oamInHigh;
   ppu->oamSecondWrite = s_raster_port.oamSecondWrite;
   ppu->oamBuffer = s_raster_port.oamBuffer;
+  if (ppu->renderVram == s_raster_field_vram ||
+      ppu->renderVram == s_raster_render_vram)
+    ppu->renderVram = NULL;
+  s_raster_vlog_render = NULL;
+  s_raster_vlog_render_count = 0;
+  s_raster_overrun = 0;
+  s_raster_vram_saved = 0;
+  memcpy(ppu->oam, s_raster_live_oam, sizeof(s_raster_live_oam));
+  memcpy(ppu->highOam, s_raster_live_high_oam, sizeof(s_raster_live_high_oam));
+  memcpy(ppu->cgram, s_raster_live_cgram, sizeof(s_raster_live_cgram));
 }
 
 /* Snapshot of the journal as the renderer will consume it, for the debug
@@ -3508,7 +3790,7 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
    * raster journal must see; recording here rather than in one caller is
    * what makes that true. */
   if (ppu == raster_machine_ppu())
-    ppu_rasterRecord((uint16_t)(0x2100u | adr), g_snes->vPos, val);
+    ppu_rasterRecord((uint16_t)(0x2100u | adr), raster_write_line(), val);
 //  if (adr != 24 && adr != 25)
 //    printf("ppu_write(%d, %d)\n", adr, val);
   switch(adr) {
@@ -3531,6 +3813,7 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
       ppu->oamSecondWrite = false;
       break;
     case 0x04: {
+      raster_oam_note_write(ppu);
       if(ppu->oamInHigh) {
         int hidx = ((ppu->oamAdr & 0xf) << 1) | ppu->oamSecondWrite;
         ppu->highOam[hidx] = val;
@@ -3625,6 +3908,9 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
     case 0x18: {
       // TODO: vram access during rendering (also cgram and oam)
       uint16_t vramAdr = ppu_getVramRemap(ppu);
+      raster_vram_note_write(ppu);
+      { const uint16_t a = vramAdr & 0x7fff, o = ppu->vram[a];
+        raster_vram_log(ppu, a, o, (uint16_t)((o & 0xff00) | val)); }
       ppu->vram[vramAdr & 0x7fff] = (ppu->vram[vramAdr & 0x7fff] & 0xff00) | val;
       ppu->vramWriteCount++;
       // $2118 == low byte of word; byte_addr = word << 1.
@@ -3641,6 +3927,9 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
     }
     case 0x19: {
       uint16_t vramAdr = ppu_getVramRemap(ppu);
+      raster_vram_note_write(ppu);
+      { const uint16_t a = vramAdr & 0x7fff, o = ppu->vram[a];
+        raster_vram_log(ppu, a, o, (uint16_t)((o & 0x00ff) | (val << 8))); }
       ppu->vram[vramAdr & 0x7fff] = (ppu->vram[vramAdr & 0x7fff] & 0x00ff) | (val << 8);
       ppu->vramWriteCount++;
       // $2119 == high byte of word; byte_addr = (word << 1) + 1.
@@ -3675,6 +3964,7 @@ void ppu_write(Ppu* ppu, uint8_t adr, uint8_t val) {
       ppu->cgramSecondWrite = false;
       break;
     case 0x22:
+      raster_cg_note_write(ppu);
       if(!ppu->cgramSecondWrite) {
         ppu->cgramBuffer = val;
       } else {
