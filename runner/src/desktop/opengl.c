@@ -54,6 +54,10 @@ static uint8 *g_screen_buffer;
 static size_t g_screen_buffer_size;
 static int g_draw_width, g_draw_height;
 static unsigned int g_program, g_flash_program, g_VAO;
+/* GlslShader_Render points attributes 0/1 at its own buffer and disables them
+ * afterwards, so it draws through this VAO: in g_VAO it left nothing enabled,
+ * and switching to no shader mid-game drew a black screen. */
+static unsigned int g_glsl_VAO;
 static GlTextureWithSize g_texture;
 static GlslShader *g_glsl_shader;
 static SnesHdGpu *g_hd_gpu;
@@ -197,6 +201,7 @@ static bool OpenGLRenderer_Init(SDL_Window *window) {
   // texture coord attribute
   glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void *)(3 * sizeof(float)));
   glEnableVertexAttribArray(1);
+  glGenVertexArrays(1, &g_glsl_VAO);
 
   // vertex shader
   const GLchar *vs_code = "#version 330 core\n" CODE(

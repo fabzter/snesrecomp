@@ -1306,16 +1306,33 @@ static uint32 TickScript(void) {
         if (!e->save_state) GameReset();
         return 0;
       }
-      // hold done — advance
-      g_script_index++;
-      if (g_script_index < g_script_count) {
-        e = &g_script_entries[g_script_index];
-        g_script_phase = 1;
-        g_script_counter = e->wait_frames;
+      if (e->mask & kScriptReset) {
+        ConsoleReset();
+        return 0;
       }
-      return 0;
+      if (e->mask & kScriptPoke) {
+        if (e->poke_bytes && e->poke_count > 0 &&
+            e->poke_addr + (uint32)e->poke_count <= 0x20000u)
+          memcpy(g_ram + e->poke_addr, e->poke_bytes, (size_t)e->poke_count);
+        return 0;
+      }
+      if (e->mask & kScriptForcePoke) {
+        if (e->poke_bytes && e->poke_count > 0)
+          AddScriptForcePoke(e->poke_addr, e->poke_bytes, e->poke_count);
+        return 0;
+      }
+      return e->mask;
+    }
+    // hold done — advance
+    g_script_index++;
+    if (g_script_index < g_script_count) {
+      e = &g_script_entries[g_script_index];
+      g_script_phase = 1;
+      g_script_counter = e->wait_frames;
     }
     return 0;
+  }
+  return 0;
   }
 }
 
