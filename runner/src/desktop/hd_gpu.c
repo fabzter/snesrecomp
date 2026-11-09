@@ -207,10 +207,19 @@ SnesHdGpu *SnesHdGpuCreate(void) {
   if (!g->program) { free(g); return NULL; }
   /* Prepared double-precision camera jobs are optional. Register jobs retain
    * the GL3.3 integer path; lacking GL4 keeps the portable consumer usable. */
+#if !defined(__APPLE__)
   if (ogl_IsVersionGEQ(4, 0)) {
     g->affine_program = hd_program_source(fragment_source, true);
     if (g->affine_program) g->coordinate_program = hd_program_source(coordinate_source, true);
   }
+#else
+  /* Apple GL-on-Metal reports GL4.1 but cannot rasterize the fp64 affine
+   * program: compile+link succeed, then the driver falls back to software
+   * vertex/fragment processing ("buildPipelineState failed") and emits
+   * garbage. Skip affine on macOS so affine frames take the native fallback
+   * (the `affine && !g->affine_program` gate already returns false). */
+  fprintf(stderr, "SNES HD GPU: affine (fp64) disabled on Apple GL-on-Metal;\n");
+#endif
   HdState saved; hd_save(&saved); glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
   glPixelStorei(GL_UNPACK_ALIGNMENT, 1); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
   glGenTextures(kHdTextures, g->textures); glGenVertexArrays(1, &g->vao); hd_bind(g, 4);
