@@ -35,7 +35,7 @@ typedef struct GlslUniforms {
   GlslTextureUniform Orig;
   GlslTextureUniform Prev[7];
   GlslTextureUniform Pass[kGlslMaxPasses];
-  GlslTextureUniform PassPrev[kGlslMaxPasses];
+  GlslTextureUniform PassPrev[kGlslMaxPasses + 1];  /* PassPrev<pass> is Orig */
   int Texture[kGlslMaxTextures];
 } GlslUniforms;
 

@@ -27,6 +27,19 @@ void WsShadowSetScroll(int layer, uint32_t scrollX, uint32_t scrollY);
 
 void WsShadowSetBlankTile(int layer, int blankEntry);
 
+/* Optional bound tile for margin samples whose computed worldX is
+ * negative — i.e. provably WEST of the world the title registered. Such
+ * samples can never be answered by history, fold, or any legitimate VRAM
+ * window; without it they fall through to the renderer's plain map wrap
+ * and show whatever the rolling tilemap happens to hold on its far page
+ * (the staged-ahead strip reads as repeated tile garbage at a world
+ * edge). Default is disabled (0); WsShadowReset clears it. It fires ONLY
+ * on worldX<0 margin fetches: native pixels, positive-worldX unproven
+ * misses, fold, blankTile and inactive/native-off behavior are untouched.
+ * Pass the game's own outside-world/empty entry or a validated fully
+ * transparent tile — never a smear, never a blanket miss value. */
+void WsShadowSetNegWorldTile(int layer, int entry);
+
 // Periodic-fold mode: for layers whose content is horizontally periodic
 // (typical parallax backdrops), margin tiles are folded to the congruent
 // column inside the native 32-column window. The period is re-detected

@@ -17,6 +17,8 @@ static int      s_warned;
 static int      s_unrewindable;
 static SnesRunaheadCapture s_capture;
 static void    *s_capture_ctx;
+static SnesRunaheadBeforeFrame s_before;
+static void    *s_before_ctx;
 
 /* Generous first-probe ceiling; the real snapshot size replaces it, exactly
  * as snes_rewind.c does. */
@@ -38,6 +40,12 @@ void snes_runahead_set_capture(SnesRunaheadCapture fn, void *context)
 {
     s_capture = fn;
     s_capture_ctx = context;
+}
+
+void snes_runahead_set_before_frame(SnesRunaheadBeforeFrame fn, void *context)
+{
+    s_before = fn;
+    s_before_ctx = context;
 }
 
 void snes_runahead_configure(void)
@@ -169,6 +177,12 @@ int snes_runahead_run_frame(uint32_t inputs)
 
     RtlSetSpeculativeFrame(true);
     for (i = 1; i <= s_frames; i++) {
+        /* Each speculative frame is a simulated frame like the real one and
+         * gets the same immediately-before-RtlRunFrame preparation when the
+         * host registered it. Frame 0 stays with the iteration-level Before
+         * (already fired) -- this hook never double-covers it. */
+        if (s_before)
+            s_before(s_before_ctx);
         /* Only the last speculative frame is rasterised -- it is the one the
          * player sees. The others exist solely to carry the guest forward. */
         g_snes->disableRender = (i < s_frames);

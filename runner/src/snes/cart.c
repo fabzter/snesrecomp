@@ -93,9 +93,26 @@ void cart_load(Cart* cart, int type, uint8_t* rom, int romSize, int ramSize) {
   }
   cart->ramSize = ramSize;
   memcpy(cart->rom, rom, romSize);
-  if (type == CART_SUPERFX)
+  if (type == CART_SUPERFX) {
     cart->superfx = superfx_create(cart->rom, cart->romSize,
                                    cart->ram, cart->ramSize);
+    /* Host GSU overclock: SNESRECOMP_SUPERFX_OVERCLOCK=<percent> (100 = stock
+     * 21.4 MHz, 200 = ~2x). Ranges outside [25,800] are clamped. Set once at
+     * cart init; the multiplier lives on the core so save states keep it. */
+    {
+      static int oc_pct = -1;
+      if (oc_pct < 0) {
+        const char *e = getenv("SNESRECOMP_SUPERFX_OVERCLOCK");
+        oc_pct = e ? atoi(e) : 100;
+        if (oc_pct < 25 || oc_pct > 800) oc_pct = 100;
+      }
+      if (cart->superfx && oc_pct != 100) {
+        superfx_set_clock_multiplier(cart->superfx,
+                                     (uint32_t)oc_pct, 100u);
+        fprintf(stderr, "[superfx] overclock %d%% (num/den %u/100)\n", oc_pct, (unsigned)oc_pct);
+      }
+    }
+  }
   if (type == CART_CX4) {
     cart->cx4 = cx4_create(cart->rom, cart->romSize, cart->ram, cart->ramSize);
     /* The HG51B S169's internal reciprocal table is not in the game ROM. This

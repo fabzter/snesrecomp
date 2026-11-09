@@ -456,6 +456,7 @@ static void OpenGLRenderer_EndDraw(void) {
     glBindVertexArray(g_VAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   } else {
+    glBindVertexArray(g_glsl_VAO);
     GlslShader_Render(g_glsl_shader, &image, viewport.x, viewport.y,
                       viewport.width, viewport.height);
   }

@@ -303,10 +303,10 @@ static void GlslShader_GetUniforms(GlslShader *gs) {
       if (p->unif.Prev[j].Texture >= 0)
         gs->max_prev_frame = j + 1;
     }
-    for (int j = 0; j < gs->n_pass; j++) {
+    for (int j = 0; j < gs->n_pass; j++)
       GlslTextureUniform_Read(program, "Pass", j, &p->unif.Pass[j]);
+    for (int j = 0; j <= gs->n_pass; j++)
       GlslTextureUniform_Read(program, "PassPrev", j, &p->unif.PassPrev[j]);
-    }
     GlslTexture *t = gs->first_texture;
     for (int j = 0; t != NULL; t = t->next, j++)
       p->unif.Texture[j] = glGetUniformLocation(program, t->id);
@@ -547,8 +547,9 @@ static void GlslShader_SetShaderVars(GlslShader *gs, RenderCtx *ctx, int pass) {
   // PassX uniforms
   for (int i = 1; i < pass; i++)
     RenderCtx_SetGlslTextureUniform(ctx, &p->unif.Pass[i], gs->pass[i].width, gs->pass[i].height, gs->pass[i].gl_texture);
-  // PassPrevX uniforms
-  for (int i = 1; i < pass; i++)
+  // PassPrevX uniforms. Counting back past the first pass reaches the
+  // original input: ScaleFX's last pass reads PassPrev5 as the game frame.
+  for (int i = 0; i < pass; i++)
     RenderCtx_SetGlslTextureUniform(ctx, &p->unif.PassPrev[pass - i], gs->pass[i].width, gs->pass[i].height, gs->pass[i].gl_texture);
   // #parameter uniforms
   for (GlslParam *pa = gs->first_param; pa != NULL; pa = pa->next)

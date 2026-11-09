@@ -120,6 +120,18 @@ bool dsp_set_output_voices(Dsp *dsp, uint8_t voices);
 /* Preserve the presentation echo during a discarded rollback replay. The
  * canonical mixer still runs; its temporary output will be discarded. */
 void dsp_suspend_output_filter(Dsp *dsp, bool suspended);
+/* Presentation only. The audible dry mix is re-interpolated from the decoded
+ * BRR samples; the hardware Gaussian still drives OUTX, pitch modulation and
+ * the echo buffer, so guest-visible state is unchanged in every mode. */
+enum {
+  kDspInterp_Gaussian,  /* hardware (default) */
+  kDspInterp_Cubic,     /* 4-tap Catmull-Rom */
+  kDspInterp_Sinc,      /* 8-tap Lanczos, two source samples late */
+  kDspInterp_Count
+};
+void dsp_set_interpolation(int mode);
+int dsp_get_interpolation(void);
+const char *dsp_interpolation_name(int mode);
 /* Call under the APU lock. This gates host PCM publication, not synthesis. */
 void dsp_set_output_suppressed(Dsp *dsp, bool suppressed);
 uint8_t dsp_read(Dsp* dsp, uint8_t adr);

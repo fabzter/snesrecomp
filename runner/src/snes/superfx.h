@@ -99,6 +99,14 @@ typedef struct SuperFx {
   uint16_t ws_center_ram, ws_max_ram;
   uint8_t ws_task_pbr;
   struct SuperFxPresentationReplay *presentation;
+
+  /* Host overclock: clock_credit accrues (master delta)*num/den. num=den=1
+   * is faithful hardware speed; num>den makes GSU work finish earlier than
+   * the S-CPU expects, which is what a real GSU overclock does. speed_rem
+   * carries sub-den remainder between syncs so non-integer ratios are exact.
+   * Host-only; not part of the save-state range. */
+  uint32_t speed_num, speed_den;
+  int64_t speed_rem;
 } SuperFx;
 
 /* A title may edit only the private RAM supplied to prepare. Returning false
@@ -133,6 +141,8 @@ void superfx_sync(SuperFx *fx, uint64_t master_clock);
  * parked polling SFR uses this to decide whether advancing time can change
  * what that poll reads. */
 bool superfx_is_running(const SuperFx *fx);
+/* Host overclock knob (num/den, 1/1 = faithful). Rejects den=0/num=0. */
+void superfx_set_clock_multiplier(SuperFx *fx, uint32_t num, uint32_t den);
 
 /* GSU PC hooks: title policy run immediately before the GSU executes the
  * instruction at `pc24` (PBR<<16 | address, as in the disassembly). The GSU is

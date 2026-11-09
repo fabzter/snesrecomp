@@ -654,6 +654,7 @@ SuperFx *superfx_create(uint8_t *rom, uint32_t rom_size, uint8_t *ram, uint32_t 
   SuperFx *f=(SuperFx*)calloc(1,sizeof(*f)); if(!f) return NULL;
   f->rom=rom; f->rom_size=rom_size; f->rom_mask=rom_size-1;
   f->ram=ram; f->ram_size=ram_size; f->ram_mask=ram_size-1;
+  f->speed_num=f->speed_den=1;
   superfx_reset(f); return f;
 }
 void superfx_destroy(SuperFx *f) {
@@ -697,6 +698,13 @@ void superfx_reset(SuperFx *f) {
 }
 bool superfx_is_running(const SuperFx *f) { return f && (f->sfr & SFR_G) != 0; }
 
+void superfx_set_clock_multiplier(SuperFx *f, uint32_t num, uint32_t den) {
+  if (!f || !num || !den) return;
+  f->speed_num = num;
+  f->speed_den = den;
+  f->speed_rem = 0;
+}
+
 #define SUPERFX_JOB_CAP 4096u
 static SuperFxJob s_jobs[SUPERFX_JOB_CAP];
 static uint32_t s_job_head;   /* total jobs ever started */
@@ -728,8 +736,21 @@ int superfx_job_log(SuperFxJob *out, int cap) {
 
 void superfx_sync(SuperFx *f, uint64_t master) {
   if(!f) return;
-  if(master < f->master_clock){ f->master_clock=master; f->clock_credit=0; return; }
-  f->clock_credit += (int64_t)(master-f->master_clock); f->master_clock=master;
+  if(master < f->master_clock){ f->master_clock=master; f->clock_credit=0; f->speed_rem=0; return; }
+  {
+    uint64_t delta = master - f->master_clock;
+    f->master_clock = master;
+    if (f->speed_den && f->speed_num != f->speed_den) {
+      /* Overclock: accrue scaled credit. speed_rem carries the sub-den
+       * remainder so non-integer ratios are exact (3/2 accrues 1.5/master
+       * clock as an alternating 1,2,1,2 series). */
+      int64_t scaled = (int64_t)delta * (int64_t)f->speed_num + f->speed_rem;
+      f->clock_credit += scaled / (int64_t)f->speed_den;
+      f->speed_rem = scaled % (int64_t)f->speed_den;
+    } else {
+      f->clock_credit += (int64_t)delta;
+    }
+  }
   /* Six clocks is the longest idle quantum and the normal uncached access. */
   unsigned guard=0; while(f->clock_credit>=6 && guard++<2000000) {
 #if SNESRECOMP_SUPERFX_IDLE_NATIVE

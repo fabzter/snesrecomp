@@ -1748,9 +1748,18 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
         const char *_e = getenv("SNESRECOMP_NO_POLLGATE");
         s_poll_gate = (_e && _e[0] && _e[0] != '0') ? 0 : 1;
     }
+    /* Set once a host-invoked interrupt handler lifts S above the frame its
+     * interrupt pushed: it has abandoned that frame (Rare's DKC engine resets
+     * S in NMI and runs the game from there) and from then on behaves as the
+     * main thread, so WAI and the frame deadline yield as in a quiescent run.
+     * Sticky because the handler then calls deeper again, below the frame. */
+    bool handler_frame_discarded = false;
     for (; steps < step_cap; steps++) {
         RtlGuestScopeCheckpoint();
         const uint32_t pc_before = ((uint32_t)in.k << 16) | in.pc;
+        if (stop_on_rti && !handler_frame_discarded && in.sp > s_exit &&
+            (uint16_t)(in.sp - s_exit) >= 3)
+            handler_frame_discarded = true;
         /* Settle the DRAM refresh tax owed by clocks generated code charged
          * after its last per-block settlement: the interpreter settles after
          * each of its own opcodes, so without this the first interpreted step
@@ -1827,7 +1836,10 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
             bridge_apu_flush(cpu);
             return 1;
         }
-        if (auto_quiescent && s_lle_master_deadline &&
+        /* A handler that abandoned its frame can outlast the field (DKC1's NMI
+         * uploads SPC data with NMI off): park it here like the main thread so
+         * the next field resumes it instead of the pre-interrupt PC. */
+        if ((auto_quiescent || handler_frame_discarded) && s_lle_master_deadline &&
             cpu->master_cycles >= s_lle_master_deadline) {
             lle_resume_set(pc_before, INTERP_RESUME_SITE_DEADLINE, in.sp);
             sync_interp_to_cpu(&in,cpu);
@@ -2828,10 +2840,20 @@ static int _interp_run_core(CpuState *cpu, uint32_t entry_pc24,
          * restore the old hook before the custom NMI can run (Metal Warriors
          * LucasArts logo at $00:B7A3). Resume PC is the instruction after WAI.
          * Only yield from scheduler/quiescent runs — never from a host
-         * interrupt handler (stop_on_rti), where nested delivery isn't set up. */
+         * interrupt handler (stop_on_rti), where nested delivery isn't set up.
+         * Exception: a handler that discarded its own interrupt frame
+         * (handler_frame_discarded) has become the main loop -- Rare's DKC
+         * engine resets S and jumps to its `WAI / BRA` idle loop from NMI.
+         * That WAI is the frame boundary.
+         * Any other WAI inside a host-invoked handler halts the same way: the
+         * frame driver parks it and delivers the next NMI on top, as hardware
+         * does. Donkey Kong Country's Candy save ends in `WAI / BRA` at
+         * $80:E90D while still inside NMI with a stack the discard test above
+         * does not recognise; looped to the step cap instead, the game never
+         * reached the next NMI and the screen stayed black after saving. */
         if (in.waiting) {
             in.waiting = false;
-            if (auto_quiescent || yield_pc) {
+            if (auto_quiescent || yield_pc || handler_frame_discarded || stop_on_rti) {
                 lle_resume_set(((uint32_t)in.k << 16) | in.pc, INTERP_RESUME_SITE_WAI, in.sp);
                 s_lle_wai_yield = 1;
                 sync_interp_to_cpu(&in, cpu);

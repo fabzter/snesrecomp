@@ -611,6 +611,11 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
       return ParseBool(value, &g_config.enable_snes9x_oracle);
     } else if (StringEqualsNoCase(key, "SkipLauncher")) {
       return ParseBool(value, &g_config.skip_launcher);
+    } else if (StringEqualsNoCase(key, "RomPatchEnabled")) {
+      return ParseBool(value, &g_config.rom_patch_enabled);
+    } else if (StringEqualsNoCase(key, "RomPatch")) {
+      snprintf(g_config.rom_patch_path, sizeof(g_config.rom_patch_path), "%s", value);
+      return true;
     }
   } else if (section == 6) {
     if (StringEqualsNoCase(key, "PlayerName")) {
@@ -910,6 +915,8 @@ void WriteConfigFile(const char *filename) {
     { "Graphics",   "VSync" },
     { "Graphics",   "Renderer" },
     { "General",    "RunAhead" },
+    { "General",    "RomPatchEnabled" },
+    { "General",    "RomPatch" },
     { "Sound",      "Volume" },
     { "Controller", "SourceP1" },
     { "Controller", "SourceP2" },
@@ -958,6 +965,8 @@ void WriteConfigFile(const char *filename) {
   CfgSet(kvs, N, "Graphics", "Renderer", "%s",
          g_config.renderer[0] ? g_config.renderer : "auto");
   CfgSet(kvs, N, "General", "RunAhead", "%d", g_config.run_ahead);
+  CfgSet(kvs, N, "General", "RomPatchEnabled", "%d", g_config.rom_patch_enabled ? 1 : 0);
+  CfgSet(kvs, N, "General", "RomPatch", "%s", g_config.rom_patch_path);
   CfgSet(kvs, N, "Sound", "Volume", "%d", g_config.volume);
   CfgSet(kvs, N, "Controller", "SourceP1", "%d", g_config.player_src[0]);
   CfgSet(kvs, N, "Controller", "SourceP2", "%d", g_config.player_src[1]);

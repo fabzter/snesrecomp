@@ -165,6 +165,11 @@ typedef struct Config {
   int rewind_interval;
   int run_ahead;
   char renderer[32];
+  /* Launcher ROM patch (Mods page): persists the player's patch selection so
+   * a relaunch still patches. Source image is not stored -- the launcher's
+   * rom.cfg cache names it. */
+  int rom_patch_enabled;
+  char rom_patch_path[512];
   /* [Sound] Volume, 0..100 (default 100): the mixer level the VolumeUp /
    * VolumeDown keys move in 5% steps and the launcher's slider edits. */
   int volume;
