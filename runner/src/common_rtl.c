@@ -1134,6 +1134,14 @@ bool RtlLoadSnapshotFromMemory(const void *data, size_t size) {
   PpuResetWidescreenOamHistory(g_snes->ppu);
   if (g_rtl_game_info && g_rtl_game_info->on_state_loaded)
     g_rtl_game_info->on_state_loaded(hdr[1]);
+  /* Semantic ordinary-load boundary: the host-published OAM coordinate
+   * table describes the abandoned timeline's pack, not the state just
+   * restored, so it is cleared unconditionally — including byte-identical
+   * loads, which content-delta detection inside ppu_saveload cannot see.
+   * A rollback load runs this same line and then restores its own
+   * coordinates from the residue tail (rtl_rb_residue_apply), so the
+   * rewind keeps exactly the publication the restored frame drew. */
+  PpuWsSetOamCoordinates(g_snes->ppu, NULL);
   ++s_state_generation;
   return true;
 }

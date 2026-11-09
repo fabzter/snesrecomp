@@ -151,6 +151,29 @@ typedef struct PpuOverlayCapture {
   uint8_t oamFirst, oamCount;
 } PpuOverlayCapture;
 
+/* Host-published signed OAM coordinates (see PpuWsSetOamCoordinates).
+ *
+ * The 9-bit OAM X byte + sign bit cannot express a sprite parked outside
+ * hardware screen space, and a widescreen-only position (e.g. x=300, x=520,
+ * x=-270) has no faithful native encoding at all. A title that knows the
+ * real positions publishes this value-owned table once per pack: x[]/y[]
+ * hold the slot's true signed screen x and packed screen Y (emitted Y minus
+ * one, modulo 256 -- the same convention the OAM Y byte carries).
+ * expectedOam/expectedHighOam are a snapshot of the low OAM words and high
+ * table AS PACKED; at decode time a slot marked in valid[] binds only while
+ * its two OAM words and its two-bit high pair still match, so a recycled or
+ * rewritten slot falls back to ordinary decode on its own.
+ *
+ * With both live margins (extraLeftCur/extraRightCur) at zero the table is
+ * inert and the whole mechanism is native decode. Presentation-only: never
+ * part of the stable guest snapshot. */
+typedef struct PpuWsOamCoordinates {
+  int16_t x[128], y[128];
+  uint16_t expectedOam[256];
+  uint8_t expectedHighOam[32];
+  uint8_t valid[16];
+} PpuWsOamCoordinates;
+
 enum {
   kPpuRenderFlags_NewRenderer = 1,
   // Preserve the established bit value for config/save compatibility.
@@ -313,6 +336,12 @@ struct Ppu {
   uint32_t wsOamMotionSig[128];
   uint8_t wsOamMotionSeen[16];
   uint8_t wsOamMotionGrace[128];
+  /* Value-owned signed OAM coordinate override (PpuWsOamCoordinates). Host
+   * state, outside every stable snapshot span: reset and save-state loads
+   * clear it, the rollback residue below carries it across rewinds, and an
+   * untouched frame never consumes it. With both live margins zero it is
+   * inert. */
+  PpuWsOamCoordinates wsOamCoordinates;
   uint8_t lastMosaicModulo;
   uint8_t lastBrightnessMult;
   bool lineHasSprites;
@@ -706,6 +735,10 @@ typedef struct PpuRollbackResidue {
   uint32_t wsOamMotionSig[128];
   uint8_t  wsOamMotionSeen[16];
   uint8_t  wsOamMotionGrace[128];
+  /* Same rule as the motion classifier: restored so a rewind reproduces the
+   * picture the restored frame is about to draw. The coordinate table is
+   * value-owned, so it travels inline (no caller pointer). */
+  PpuWsOamCoordinates wsOamCoordinates;
 } PpuRollbackResidue;
 
 void ppu_rb_residue_get(const Ppu *ppu, PpuRollbackResidue *out);
@@ -828,6 +861,13 @@ void PpuWsSetOamLeftHints(Ppu *ppu, const uint8_t *hints);
 // Games that stage OAM CPU-side should call this each NMI, after the staging
 // buffer is final and before the frame is presented.
 void PpuWsSetOamRightHints(Ppu *ppu, const uint8_t *hints);
+
+// Publish the pack's signed OAM coordinates (see PpuWsOamCoordinates). The
+// table is copied (value-owned); NULL clears the whole publication. Slots not
+// marked in valid[] and slots whose packed OAM/high-OAM no longer matches the
+// published snapshot decode natively. Presentation-only; call once per pack
+// after staging is final.
+void PpuWsSetOamCoordinates(Ppu *ppu, const PpuWsOamCoordinates *coordinates);
 
 // Let BG3 (layer 2) render into the widescreen side margins on scanlines
 // >= from_y, instead of being clamped to the authentic 256-wide region. Pass

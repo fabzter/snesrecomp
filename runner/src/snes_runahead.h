@@ -88,6 +88,17 @@ int snes_runahead_run_frame(uint32_t inputs);
 typedef void (*SnesRunaheadCapture)(void *context, int for_picture);
 void snes_runahead_set_capture(SnesRunaheadCapture fn, void *context);
 
+/* OPTIONAL per-speculative-frame preparation, invoked immediately before
+ * each RtlRunFrame inside the speculative loop (frames 1..N -- frame 0 is
+ * the caller's own real frame and keeps its own Before placement, so the
+ * hook never double-fires for it). NULL (the default) preserves the
+ * pre-hook scheduling exactly: speculative frames then run with whatever
+ * preparation the iteration-level Before armed. Same (void *context)
+ * convention as the capture callback. */
+typedef void (*SnesRunaheadBeforeFrame)(void *context);
+void snes_runahead_set_before_frame(SnesRunaheadBeforeFrame fn,
+                                    void *context);
+
 /* Frees the snapshot buffer. */
 void snes_runahead_shutdown(void);
 

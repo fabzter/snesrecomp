@@ -115,7 +115,11 @@ typedef struct SnesDesktopHostGame {
   /* The guest's timeline just jumped: reset, save-state load, an overlay
    * closed after freezing it. Presenters drop interpolation history here. */
   void (*on_reset)(void);
-  /* Immediately before RtlRunFrame. */
+  /* Immediately before RtlRunFrame — for EVERY simulated frame. The host
+   * invokes it in the normal/netplay/replay placements and additionally
+   * registers it as run-ahead's per-speculative-frame preparation, so each
+   * frame inside the speculation is covered too (frame 0 keeps the
+   * outer-loop call; no double-fire). */
   void (*before_run_frame)(void);
   /* Immediately after RtlRunFrame (guest state is at a frame boundary). */
   void (*after_run_frame)(const SnesDesktopHostFrameStats *stats);

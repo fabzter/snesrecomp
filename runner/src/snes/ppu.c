@@ -128,22 +128,33 @@ void ppu_saveload(Ppu *ppu, SaveLoadInfo *sli) {
   assert(offsetof(Ppu, vram) + 0x10000 - offsetof(Ppu, cgram) == PPU_SAVESTATE_MEM_SIZE);
   uint32 version[2] = {'P' | 'P' << 8 | 'U' << 16 | '0' << 24, PPU_SAVESTATE_REGS_SIZE + PPU_SAVESTATE_MEM_SIZE};
   sli->func(sli, version, 8);
+  static uint8_t regs_before[PPU_SAVESTATE_REGS_SIZE];
+  memcpy(regs_before, &ppu->inidisp, sizeof(regs_before));
   sli->func(sli, &ppu->inidisp, PPU_SAVESTATE_REGS_SIZE);
   /* The write counters must move on a load (it replaces VRAM and OAM
    * wholesale) and must NOT move on a save: rewind and run-ahead save every
    * few frames, and a host pairing "OAM was just uploaded" with what produced
    * it would take each snapshot for an upload. There is no direction flag,
-   * so compare what the call left behind. */
+   * so compare what the call left behind. The same comparison doubles as
+   * load detection below. */
   static uint16_t vram_before[0x8000], oam_before[0x100];
   static uint8_t high_before[0x20];
+  static uint16_t cgram_before[0x100];
   memcpy(vram_before, ppu->vram, sizeof(vram_before));
   memcpy(oam_before, ppu->oam, sizeof(oam_before));
   memcpy(high_before, ppu->highOam, sizeof(high_before));
+  memcpy(cgram_before, ppu->cgram, sizeof(cgram_before));
   sli->func(sli, &ppu->cgram, PPU_SAVESTATE_MEM_SIZE);
   if (memcmp(vram_before, ppu->vram, sizeof(vram_before)) != 0) ppu->vramWriteCount++;
   if (memcmp(oam_before, ppu->oam, sizeof(oam_before)) != 0 ||
       memcmp(high_before, ppu->highOam, sizeof(high_before)) != 0)
     ppu->oamWriteCount++;
+  if (memcmp(regs_before, &ppu->inidisp, sizeof(regs_before)) != 0 ||
+      memcmp(cgram_before, ppu->cgram, sizeof(cgram_before)) != 0 ||
+      memcmp(vram_before, ppu->vram, sizeof(vram_before)) != 0 ||
+      memcmp(oam_before, ppu->oam, sizeof(oam_before)) != 0 ||
+      memcmp(high_before, ppu->highOam, sizeof(high_before)) != 0)
+    memset(&ppu->wsOamCoordinates, 0, sizeof(ppu->wsOamCoordinates));
 }
 
 void PpuResetWidescreenOamHistory(Ppu *ppu) {
@@ -169,6 +180,8 @@ void ppu_rb_residue_get(const Ppu *ppu, PpuRollbackResidue *out) {
   memcpy(out->wsOamMotionSig, ppu->wsOamMotionSig, sizeof(out->wsOamMotionSig));
   memcpy(out->wsOamMotionSeen, ppu->wsOamMotionSeen, sizeof(out->wsOamMotionSeen));
   memcpy(out->wsOamMotionGrace, ppu->wsOamMotionGrace, sizeof(out->wsOamMotionGrace));
+  memcpy(&out->wsOamCoordinates, &ppu->wsOamCoordinates,
+         sizeof(out->wsOamCoordinates));
 }
 
 void ppu_rb_residue_set(Ppu *ppu, const PpuRollbackResidue *in) {
@@ -183,6 +196,8 @@ void ppu_rb_residue_set(Ppu *ppu, const PpuRollbackResidue *in) {
   memcpy(ppu->wsOamMotionSig, in->wsOamMotionSig, sizeof(in->wsOamMotionSig));
   memcpy(ppu->wsOamMotionSeen, in->wsOamMotionSeen, sizeof(in->wsOamMotionSeen));
   memcpy(ppu->wsOamMotionGrace, in->wsOamMotionGrace, sizeof(in->wsOamMotionGrace));
+  memcpy(&ppu->wsOamCoordinates, &in->wsOamCoordinates,
+         sizeof(in->wsOamCoordinates));
 }
 
 // Debug layer isolation: SNESRECOMP_LAYER_MASK is a bitmask of layers to keep
@@ -1172,7 +1187,7 @@ static void PpuDrawBackground_4bpp(Ppu *ppu, PpuPixelPrioBufs *dstbuf,
 #define DO_PIXEL_HFLIP(i) do { \
   pixel = (bits >> (7 - i)) & 1 | (bits >> (14 - i)) & 2 | (bits >> (21 - i)) & 4 | (bits >> (28 - i)) & 8; \
   if (VIEWPORT_ALLOWED(i) && (bits & (0x80808080 >> i)) && z > dstz[i]) dstz[i] = z + pixel; } while (0)
-#define READ_BITS(ta, tile) (addr = &PpuRenderVram(ppu)[((ta) + (tile) * 16) & 0x7fff], addr[0] | addr[8] << 16)
+#define READ_BITS(ta, tile) (addr = &PpuRenderVram(ppu)[((ta) + (tile) * 16) & 0x7fff], addr[0] | ((uint32)addr[8] << 16))
   enum { kPaletteShift = 6 };
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
@@ -1784,7 +1799,7 @@ static void PpuDrawBackground_4bpp_mosaic(Ppu *ppu,
       (int)(dstz + (i) - dstbuf->data - kPpuExtraLeftRight))
 #define GET_PIXEL() pixel = (bits) & 1 | (bits >> 7) & 2 | (bits >> 14) & 4 | (bits >> 21) & 8
 #define GET_PIXEL_HFLIP() pixel = (bits >> 7) & 1 | (bits >> 14) & 2 | (bits >> 21) & 4 | (bits >> 28) & 8
-#define READ_BITS(ta, tile) (addr = &PpuRenderVram(ppu)[((ta) + (tile) * 16) & 0x7fff], addr[0] | addr[8] << 16)
+#define READ_BITS(ta, tile) (addr = &PpuRenderVram(ppu)[((ta) + (tile) * 16) & 0x7fff], addr[0] | ((uint32)addr[8] << 16))
   enum { kPaletteShift = 6 };
   if (!IS_SCREEN_ENABLED(ppu, sub, layer))
     return;  // layer is completely hidden
@@ -2792,7 +2807,46 @@ static int PpuAdjustWidescreenHudOamX(Ppu *ppu, uint8_t index, uint8_t y,
   return x;
 }
 
-static int PpuDecodeOamX(Ppu *ppu, uint8_t index) {
+void PpuWsSetOamCoordinates(Ppu *ppu, const PpuWsOamCoordinates *coordinates) {
+  if (!ppu)
+    return;
+  if (coordinates)
+    memcpy(&ppu->wsOamCoordinates, coordinates, sizeof(ppu->wsOamCoordinates));
+  else
+    memset(&ppu->wsOamCoordinates, 0, sizeof(ppu->wsOamCoordinates));
+}
+
+/* Decode-time binding: true when slot `index >> 1` is marked valid AND its
+ * two actual OAM words and its two-bit high pair still equal the published
+ * snapshot. Inert while both live margins are zero -- no signature work runs
+ * and the whole mechanism is ordinary native decode. A mismatch binds only
+ * that slot to normal decode; the rest of the table is untouched. */
+static bool PpuWsOamCoordinatesMatch(const Ppu *ppu, uint8_t index) {
+  const PpuWsOamCoordinates *c = &ppu->wsOamCoordinates;
+  const uint8_t slot = (uint8_t)(index >> 1);
+  if (!(ppu->extraLeftCur | ppu->extraRightCur))
+    return false;
+  if (!(c->valid[slot >> 3] & (1u << (slot & 7))))
+    return false;
+  if (c->expectedOam[index] != ppu->oam[index] ||
+      c->expectedOam[index + 1] != ppu->oam[index + 1])
+    return false;
+  return ((c->expectedHighOam[slot >> 2] ^ ppu->highOam[slot >> 2]) >>
+              ((slot & 3) * 2) &
+          3) == 0;
+}
+
+/* Signed screen X of a slot: the published coordinate when generation-valid,
+ * else the ordinary 9-bit decode with its widescreen hint band. When
+ * `overridden` is non-NULL it reports which branch supplied the value. */
+static int PpuDecodeOamX(Ppu *ppu, uint8_t index, bool *overridden) {
+  if (PpuWsOamCoordinatesMatch(ppu, index)) {
+    if (overridden)
+      *overridden = true;
+    return ppu->wsOamCoordinates.x[index >> 1];
+  }
+  if (overridden)
+    *overridden = false;
   int x = ppu->oam[index] & 0xff;
   x |= ((ppu->highOam[index >> 3] >> (index & 7)) & 1) << 8;
   if (x >= 256 + ppu->extraRightCur) {
@@ -2805,11 +2859,27 @@ static int PpuDecodeOamX(Ppu *ppu, uint8_t index) {
   return x;
 }
 
+/* Packed screen Y of a slot (emitted Y minus one, modulo 256 -- the OAM Y
+ * byte's convention): the published coordinate when generation-valid, else
+ * the byte the pack actually stored. */
+static uint8_t PpuDecodeOamY(Ppu *ppu, uint8_t index, bool *overridden) {
+  if (PpuWsOamCoordinatesMatch(ppu, index)) {
+    if (overridden)
+      *overridden = true;
+    return (uint8_t)ppu->wsOamCoordinates.y[index >> 1];
+  }
+  if (overridden)
+    *overridden = false;
+  return (uint8_t)(ppu->oam[index] >> 8);
+}
+
 static uint32_t PpuOamMotionSignature(Ppu *ppu, uint8_t index) {
   uint8_t slot = index >> 1;
   uint32_t high_pair =
       (ppu->highOam[slot >> 2] >> ((slot & 3) * 2)) & 0x3u;
-  return ((uint32_t)(ppu->oam[index] >> 8)) |
+  /* Signature of the effective sprite: published coordinates participate so
+   * a (re)bound coordinate does not look like guest motion either way. */
+  return ((uint32_t)PpuDecodeOamY(ppu, index, NULL)) |
          ((uint32_t)ppu->oam[index + 1] << 8) |
          ((high_pair & 0x2u) << 23);
 }
@@ -2857,7 +2927,7 @@ static void PpuUpdateWidescreenOamHistory(Ppu *ppu, int line) {
     return;
   for (uint8_t slot = 0; slot < 128; slot++) {
     uint8_t index = (uint8_t)(slot * 2);
-    int16_t x = (int16_t)PpuDecodeOamX(ppu, index);
+    int16_t x = (int16_t)PpuDecodeOamX(ppu, index, NULL);
     uint32_t sig = PpuOamMotionSignature(ppu, index);
     if (PpuWsOamHistorySeen(ppu, slot) &&
         sig == ppu->wsOamMotionSig[slot]) {
@@ -2949,20 +3019,24 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
   // Range evaluation walks OAM forward, but tile fetching walks the accepted
   // sprites backward. This is observable when the 34-sliver limit is reached.
   for(int i = 0; i < 128; i++) {
-    uint8_t y = ppu->oam[index] >> 8;
+    bool coord;
+    uint8_t y = PpuDecodeOamY(ppu, index, &coord);
     uint8_t row = line - y;
     int spriteSize = spriteSizes[PPU_objSize(ppu)][(ppu->highOam[index >> 3] >> ((index & 7) + 1)) & 1];
     int spriteHeight = PPU_objInterlace(ppu) ? spriteSize / 2 : spriteSize;
     if(row < spriteHeight) {
-      int x = PpuDecodeOamX(ppu, index);
+      int x = PpuDecodeOamX(ppu, index, &coord);
+      /* A generation-valid coordinate bypasses the HUD anchor range and the
+       * left-hint/motion admission gate; it still obeys the live margins. */
+      const bool hud_slot = !coord && PpuWidescreenHudOamSlot(ppu, index, y);
       const int left_extra =
-          PpuWidescreenHudOamSlot(ppu, index, y) &&
-                  (ppu->wsHudSplitHeight & 0x80)
+          hud_slot && (ppu->wsHudSplitHeight & 0x80)
               ? ppu->extraLeftRight
               : ppu->extraLeftCur;
-      if (PpuWidescreenOamLeftHintAllows(ppu, index, x, spriteSize,
+      if (coord || PpuWidescreenOamLeftHintAllows(ppu, index, x, spriteSize,
                                           left_extra)) {
-        x = PpuAdjustWidescreenHudOamX(ppu, index, y, x);
+        if (!coord)
+          x = PpuAdjustWidescreenHudOamX(ppu, index, y, x);
         if(x + spriteSize > -left_extra) {
           spritesFound++;
           if(spritesFound > 32 &&
@@ -2980,18 +3054,22 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
 
   for(int i = spritesFound; i > 0; i--) {
     index = foundSprites[i - 1];
-    uint8_t row = line - (ppu->oam[index] >> 8);
+    bool coord;
+    uint8_t sprite_y = PpuDecodeOamY(ppu, index, &coord);
+    uint8_t row = line - sprite_y;
     int spriteSize = spriteSizes[PPU_objSize(ppu)][(ppu->highOam[index >> 3] >> ((index & 7) + 1)) & 1];
-    int x = PpuDecodeOamX(ppu, index);
-    const uint8_t sprite_y = ppu->oam[index] >> 8;
+    int x = PpuDecodeOamX(ppu, index, &coord);
+    /* Generation-valid coordinates bypass the HUD anchor; their bounds use
+     * the live margins like any ordinary slot. */
     const bool full_budget_hud =
-        PpuWidescreenHudOamSlot(ppu, index, sprite_y) &&
+        !coord && PpuWidescreenHudOamSlot(ppu, index, sprite_y) &&
         (ppu->wsHudSplitHeight & 0x80);
     const int left_extra =
         full_budget_hud ? ppu->extraLeftRight : ppu->extraLeftCur;
     const int right_extra =
         full_budget_hud ? ppu->extraLeftRight : ppu->extraRightCur;
-    x = PpuAdjustWidescreenHudOamX(ppu, index, sprite_y, x);
+    if (!coord)
+      x = PpuAdjustWidescreenHudOamX(ppu, index, sprite_y, x);
         if(PPU_objInterlace(ppu)) row = row * 2 + (ppu->evenFrame ? 0 : 1);
         int oam1 = ppu->oam[index + 1];
         int objAdr = (oam1 & 0x100) ? PPU_objTileAdr2(ppu) : PPU_objTileAdr1(ppu);
@@ -3014,7 +3092,7 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
       int usedTile = ((((oam1 & 0xff) >> 4) + (row >> 3)) << 4) |
                      (((oam1 & 0xf) + (usedCol >> 3)) & 0xf);
             const uint16 *addr = &PpuRenderVram(ppu)[(objAdr + usedTile * 16 + (row & 0x7)) & 0x7fff];
-            uint32 plane = addr[0] | addr[8] << 16;
+            uint32 plane = addr[0] | ((uint32)addr[8] << 16);
             int px_left = IntMax(-(col + x + kPpuExtraLeftRight), 0);
             int px_right = IntMin(256 + kPpuExtraLeftRight - (col + x), 8);
             PpuZbufType *dst = ppu->objBuffer.data + col + x + px_left + kPpuExtraLeftRight;
@@ -3053,7 +3131,7 @@ static bool ppu_evaluateSprites(Ppu* ppu, int line) {
              * business in the margin, and clipping it at the screen edge
              * beats popping it out a whole sprite at a time. */
             const bool ws_clip_left =
-                ws_edge_clip_on && ppu->wsOamLeftHintStrict &&
+                !coord && ws_edge_clip_on && ppu->wsOamLeftHintStrict &&
                 !(ppu->wsOamLeftHint[slot >> 3] & (1u << (slot & 7))) &&
                 !(ppu->wsOamMotionGraceOn && ppu->wsOamMotionGrace[slot]);
             PpuOverlayCapture *obj_capture =

@@ -39,6 +39,7 @@ typedef struct WsShadowLayer {
   uint8_t *guessOrigin;
   uint32_t validCount;
   int blankTilePlus1;
+  int negWorldTilePlus1; /* opt-in worldX<0 bound tile; 0 = disabled */
   uint32_t lastTx0;
   uint32_t lastTy0;
   bool haveLastOrigin;
@@ -170,6 +171,7 @@ void WsShadowReset(void) {
     if (layer->cooldown)
       memset(layer->cooldown, 0, (size_t)kWsShadowXTiles * kWsShadowYTiles);
     layer->validCount = 0;
+    layer->negWorldTilePlus1 = 0;
     layer->registered = false;
     layer->active = false;
     layer->fold = false;
@@ -284,6 +286,13 @@ void WsShadowSetBlankTile(int layerIndex, int blankEntry) {
     return;
   s_layers[layerIndex].blankTilePlus1 =
       blankEntry >= 0 && blankEntry <= 0xffff ? blankEntry + 1 : 0;
+}
+
+void WsShadowSetNegWorldTile(int layerIndex, int entry) {
+  if (layerIndex < 0 || layerIndex >= kLayers)
+    return;
+  s_layers[layerIndex].negWorldTilePlus1 =
+      entry >= 0 && entry <= 0xffff ? entry + 1 : 0;
 }
 
 void WsShadowSetRetainHistory(int layerIndex, bool retain) {
@@ -1323,6 +1332,14 @@ uint16_t WsShadowTile(int layerIndex, int screenX, uint32_t wrappedY,
     }
     if (hit)
       return entry;
+  }
+
+  /* Provably west of the registered world: no history, fold or VRAM
+   * window can legitimately answer; serve the opt-in outside tile when
+   * the title armed one (default disabled -> established behavior). */
+  if (worldX < 0 && layer->negWorldTilePlus1) {
+    s_marginStats[layerIndex].westBlank++;
+    return (uint16_t)(layer->negWorldTilePlus1 - 1);
   }
 
   if (layer->fold && layer->foldVram) {
