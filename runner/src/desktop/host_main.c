@@ -230,6 +230,8 @@ static void HandleCommand(uint32 j, bool pressed);
 static void LoadAudioInterpolation(void);
 static void PollKeyboardControls(const uint8_t *keys);
 static void RequestScreenshot(void);
+static void InputLogOpen(void);
+static void InputLogTick(uint32 *inputs);
 #ifndef __ANDROID__
 void OpenGLRenderer_Create(struct RendererFuncs *funcs);
 #include "opengl.h" /* snesrecomp_opengl_set_vsync */
@@ -4736,6 +4738,8 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
   snes_savestate_menu_set_compose(ComposeStateThumbnail);
   host_report_breadcrumb("entering main loop");
 
+  InputLogOpen();
+
   while (running) {
     g_profile_frame = frameCtr + 1;
     if (profile_requested && !g_profile && g_profile_frame >= profile_first) {
@@ -5178,6 +5182,7 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
       break;
     }
     inputs |= debug_server_get_controller_inputs();
+    InputLogTick(&inputs);
     double profile_start = ProfileStart();
     double guest_start = MonotonicSeconds();
     PushExtraSeats();
@@ -5637,6 +5642,117 @@ static void RequestScreenshot(void) {
   }
   OpenGLRenderer_RequestScreenshot();
 #endif
+}
+
+/* ── Input record / replay ───────────────────────────────────────────────
+ * Every simulated frame's seat bits are appended to ws_input_log.csv
+ * beside the executable (session-marked, rotated at 32 MiB) so a player
+ * report can be reproduced frame-exactly: SNESRECOMP_INPUT_REPLAY=<file>
+ * [SNESRECOMP_REPLAY_SESSION=<n>, default last] replaces the seat bits
+ * from the log instead of reading human input. Frames the guest never
+ * ran (frozen menus, launcher) are absent from both sides, so counters
+ * stay aligned. Hotkey-driven freezes (rewind, save browser) diverge a
+ * replay by design; recording sessions should avoid them. */
+typedef struct InputReplayRow { uint32 frame; uint32 mask; } InputReplayRow;
+static FILE *s_input_log;
+static InputReplayRow *s_rep_rows;
+static size_t s_rep_n, s_rep_cap, s_rep_cursor;
+static bool s_rep_active;
+
+static void InputLogOpen(void) {
+  char path[1024];
+  if (!snesrecomp_exe_dir_path("ws_input_log.csv", path, sizeof(path)))
+    snprintf(path, sizeof(path), "ws_input_log.csv");
+  FILE *probe = fopen(path, "rb");
+  if (probe) {
+    fseek(probe, 0, SEEK_END);
+    long sz = ftell(probe);
+    fclose(probe);
+    if (sz > 32l * 1024l * 1024l) {
+      char old[1100];
+      snprintf(old, sizeof(old), "%s.1", path);
+      remove(old);
+      rename(path, old);
+    }
+  }
+  s_input_log = fopen(path, "a");
+  if (s_input_log) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    fprintf(s_input_log, "# session wall_ms=%lld\n",
+            (long long)(ts.tv_sec * 1000ll + ts.tv_nsec / 1000000));
+  }
+  const char *rep = getenv("SNESRECOMP_INPUT_REPLAY");
+  if (!rep || !rep[0])
+    return;
+  FILE *f = fopen(rep, "r");
+  if (!f)
+    return;
+  int want = 0;
+  const char *ws = getenv("SNESRECOMP_REPLAY_SESSION");
+  if (ws && ws[0])
+    want = atoi(ws);
+  char line[128];
+  int session = -1;
+  InputReplayRow *rows = NULL;
+  size_t n = 0, cap = 0;
+  while (fgets(line, sizeof(line), f)) {
+    if (line[0] == '#') {
+      session++;
+      if (rows && session > want)
+        break;
+      if (session < want) {
+        n = 0;
+        continue;
+      }
+      if (session == want)
+        n = 0;
+      continue;
+    }
+    if (session != want)
+      continue;
+    unsigned fr = 0, mk = 0;
+    if (sscanf(line, "%u,%u", &fr, &mk) != 2)
+      continue;
+    if (n == cap) {
+      cap = cap ? cap * 2 : 4096;
+      rows = (InputReplayRow *)realloc(rows, cap * sizeof(*rows));
+    }
+    rows[n].frame = fr;
+    rows[n].mask = mk & 0x00ffffffu;
+    n++;
+  }
+  fclose(f);
+  if (rows && n) {
+    s_rep_rows = rows;
+    s_rep_n = n;
+    s_rep_active = true;
+    fprintf(stderr, "[input-replay] %zu rows from session %d of %s\n", n,
+            want, rep);
+  } else {
+    free(rows);
+    fprintf(stderr, "[input-replay] no rows for session %d in %s\n", want,
+            rep);
+  }
+}
+
+static void InputLogTick(uint32 *inputs) {
+  extern int snes_frame_counter;
+  if (s_rep_active) {
+    uint32 fr = (uint32)snes_frame_counter;
+    if (s_rep_cursor < s_rep_n && s_rep_rows[s_rep_cursor].frame < fr)
+      s_rep_cursor++;
+    if (s_rep_cursor < s_rep_n && s_rep_rows[s_rep_cursor].frame == fr)
+      *inputs = (*inputs & ~0x00ffffffu) | s_rep_rows[s_rep_cursor].mask;
+    else
+      *inputs &= ~0x00ffffffu;
+  }
+  if (s_input_log) {
+    fprintf(s_input_log, "%u,%u\n", (unsigned)snes_frame_counter,
+            *inputs & 0x00ffffffu);
+    if ((snes_frame_counter & 63) == 0)
+      fflush(s_input_log);
+  }
 }
 
 static uint32 GetActiveControllers(void) {
