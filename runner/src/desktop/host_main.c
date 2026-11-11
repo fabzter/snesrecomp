@@ -1045,6 +1045,7 @@ static ScriptEntry *NewScriptEntry(int *cap) {
  *   reset                   the Reset hotkey's console reset
  *   turbo on|off            change the held-Turbo state at this frame boundary
  *   renderer toggle         invoke the renderer hotkey at this boundary
+ *   screenshot              invoke the screenshot hotkey at this boundary
  *   poke <addr> <hex>       write WRAM bytes for one frame
  *   pokefor <addr> <hex> N  write WRAM bytes for N frames
  *   forcepoke <addr> <hex>  write WRAM bytes every frame from now on
@@ -1093,6 +1094,12 @@ static void LoadScript(const char *path) {
       }
       ScriptEntry *e = NewScriptEntry(&cap);
       e->mask = kScriptHostControl | (strcmp(arg1, "on") == 0 ? 1u : 0u);
+      e->wait_frames = pending_wait;
+      pending_wait = 0;
+    } else if (strcmp(cmd, "screenshot") == 0) {
+      ScriptEntry *e = NewScriptEntry(&cap);
+      e->mask = kScriptHostControl;
+      e->host_command = kKeys_Screenshot;
       e->wait_frames = pending_wait;
       pending_wait = 0;
     } else if (strcmp(cmd, "renderer") == 0) {
