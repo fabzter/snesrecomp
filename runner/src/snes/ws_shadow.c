@@ -17,6 +17,7 @@ enum {
 
 typedef struct WsShadowLayer {
   bool registered;
+  bool hold; /* title froze this layer for the current frame */
   bool active;
   bool wide;
   bool fold;      /* periodic fold enabled (composes with world history) */
@@ -164,6 +165,7 @@ static bool IsLiveOpaque(uint16_t tile) {
 void WsShadowReset(void) {
   for (int i = 0; i < kLayers; i++) {
     WsShadowLayer *layer = &s_layers[i];
+    layer->hold = false;
     if (layer->valid)
       memset(layer->valid, 0, kWsShadowXTiles * kWsShadowYTiles / 8);
     if (layer->guessOrigin)
@@ -293,6 +295,12 @@ void WsShadowSetNegWorldTile(int layerIndex, int entry) {
     return;
   s_layers[layerIndex].negWorldTilePlus1 =
       entry >= 0 && entry <= 0xffff ? entry + 1 : 0;
+}
+
+void WsShadowSetFrameHold(int layerIndex, bool hold) {
+  if (layerIndex < 0 || layerIndex >= kLayers)
+    return;
+  s_layers[layerIndex].hold = hold;
 }
 
 void WsShadowSetRetainHistory(int layerIndex, bool retain) {
@@ -970,10 +978,18 @@ static int EstimateOccMassDy(const uint8_t *prev_occ, int prev_cols,
 void WsShadowFrame(const struct Ppu *ppu) {
   for (int i = 0; i < kLayers; i++) {
     WsShadowLayer *layer = &s_layers[i];
-    layer->active = layer->registered;
+    const bool reg = layer->registered;
+    layer->active = reg || layer->hold;
     layer->registered = false;
     if (!layer->active)
       continue;
+    if (!reg) {
+      /* Hold frame: the title could not prove its world mapping this frame
+       * (DMA race, mid-transition view). Keep the store and stay active so
+       * the gutters serve last-good history instead of raw tilemap wrap,
+       * and skip the capture so nothing is keyed at a stale origin. */
+      continue;
+    }
 
     layer->wide = PPU_bgTilemapWider(ppu, i) != 0;
     layer->tileShift = PPU_bigTiles(ppu, i) ? 4 : 3;
@@ -1374,6 +1390,14 @@ uint16_t WsShadowTile(int layerIndex, int screenX, uint32_t wrappedY,
     s_marginStats[layerIndex].westRawFallback++;
   else
     s_marginStats[layerIndex].eastRawFallback++;
+  {
+    static int dbg = -1, n;
+    if (dbg < 0) dbg = getenv("SNESRECOMP_WS_MISS_DEBUG") != NULL;
+    if (dbg && n++ < 40)
+      fprintf(stderr, "[wsmiss] f? sx=%d world=(%u,%u) tile=(%u,%u) mapbase=%04X\n",
+              screenX, worldX, worldY, worldX >> shift, worldY >> shift,
+              layer->mapBaseWord);
+  }
   return realTile;
 }
 

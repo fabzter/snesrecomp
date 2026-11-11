@@ -55,6 +55,12 @@ void WsShadowSetPeriodicFold(int layer);
  * layer's tilemap base changes (room/scene switch). Off by default. */
 void WsShadowSetRetainHistory(int layer, bool retain);
 
+/* Freeze one layer for this frame: WsShadowFrame keeps it active with its
+ * existing store and skips the viewport capture. A title whose per-frame
+ * world proof fails transiently uses this instead of dropping the layer, so
+ * a single bad frame cannot flash raw tilemap wrap into the gutters. */
+void WsShadowSetFrameHold(int layerIndex, bool hold);
+
 /* Total tilemap columns to capture per frame (default: the 256px viewport
  * plus one fine-scroll overhang column). Games that draw extra valid columns
  * beyond the viewport (streaming headroom) can widen this so margins pick
