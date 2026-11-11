@@ -3,10 +3,10 @@
  * PolyForm Noncommercial, the retained upstream material stays MIT. */
 #pragma once
 /* Shared Mega Man X trilogy desktop configuration contract. */
-#include "types.h"
-#include "sdl_compat.h"
 #include "display_aspect.h"
+#include "sdl_compat.h"
 #include "snes/hd_jobs.h"
+#include "types.h"
 
 /* Controller seats the desktop host can drive: two console ports, or up to
  * eight with a Super Multitap in each (docs/MULTITAP.md). */
@@ -94,6 +94,10 @@ typedef struct Config {
   uint8 display_aspect;
   uint8 fullscreen;
   uint8 window_scale;
+  /* Window shape for an Auto-sized window: index into the host's window-ratio
+   * table (0 = 4:3, the historical default). A title's window_base_width hook
+   * reads it; an explicit WindowSize=WxH still overrides. */
+  uint8 window_ratio;
   bool enable_audio;
   bool linear_filtering;
   SnesHdSettings mode7; /* Local presentation; defaults to GPU 8x. */
@@ -114,7 +118,8 @@ typedef struct Config {
   bool disable_frame_delay;
 
   // Boot straight to the game, skipping the GUI launcher, on subsequent runs.
-  // Set from the launcher's dashboard checkbox. Force the launcher back with the
+  // Set from the launcher's dashboard checkbox. Force the launcher back with
+  // the
   // --launcher argument or by setting SkipLauncher = 0 in config.ini.
   bool skip_launcher;
   bool expose_coverage_mod;
@@ -138,17 +143,14 @@ typedef struct Config {
   /* Presentation and emulation options the desktop host offers through the
    * launcher's Display page, persisted by WriteConfigFile:
    *   [Graphics] FrameBlend  average each presented frame with the previous
-   *                          one (alternate-frame flicker reads as translucency)
-   *   [Graphics] VSync       driver vsync at present time (default on);
-   *                          tri-state, kSnesVSync_* below. The launcher has
-   *                          offered Off/On/Adaptive for as long as the row
-   *                          has existed; this host used to store a bool, so
-   *                          Adaptive silently came back as On on the next
-   *                          launch. Legacy 0/1/true/false spellings still
-   *                          read exactly as before.
-   *   [Graphics] Renderer    "auto" (SDL's pick), "opengl" (the native GL
-   *                          presenter), "software", or an SDL render driver
-   *                          name such as "vulkan"; empty follows OutputMethod
+   *                          one (alternate-frame flicker reads as
+   * translucency) [Graphics] VSync       driver vsync at present time (default
+   * on); tri-state, kSnesVSync_* below. The launcher has offered
+   * Off/On/Adaptive for as long as the row has existed; this host used to store
+   * a bool, so Adaptive silently came back as On on the next launch. Legacy
+   * 0/1/true/false spellings still read exactly as before. [Graphics] Renderer
+   * "auto" (SDL's pick), "opengl" (the native GL presenter), "software", or an
+   * SDL render driver name such as "vulkan"; empty follows OutputMethod
    *   [General]  RunAhead    frames of local input-latency hiding (0 = off)
    * The [Video] / [Emulation] spellings a per-game host used for the same
    * settings are accepted on read. */
@@ -269,16 +271,22 @@ int ConfigPadSeats(void);
 
 /* Controller command range of seat `seat` (0-based), or 0 when none. */
 static inline int ConfigSeatControlsBase(int seat) {
-  if (seat == 0) return kKeys_Controls;
-  if (seat == 1) return kKeys_ControlsP2;
-  if (seat >= 2 && seat < kSnesHostPadSeats) return kKeys_ControlsP3 + (seat - 2) * 12;
+  if (seat == 0)
+    return kKeys_Controls;
+  if (seat == 1)
+    return kKeys_ControlsP2;
+  if (seat >= 2 && seat < kSnesHostPadSeats)
+    return kKeys_ControlsP3 + (seat - 2) * 12;
   return 0;
 }
 /* Seat (0-based) owning controller command `cmd`, or -1. */
 static inline int ConfigSeatForControl(int cmd) {
-  if (cmd >= kKeys_Controls && cmd <= kKeys_Controls_Last) return 0;
-  if (cmd >= kKeys_ControlsP2 && cmd <= kKeys_ControlsP2_Last) return 1;
-  if (cmd >= kKeys_ControlsP3 && cmd <= kKeys_ControlsP8_Last) return 2 + (cmd - kKeys_ControlsP3) / 12;
+  if (cmd >= kKeys_Controls && cmd <= kKeys_Controls_Last)
+    return 0;
+  if (cmd >= kKeys_ControlsP2 && cmd <= kKeys_ControlsP2_Last)
+    return 1;
+  if (cmd >= kKeys_ControlsP3 && cmd <= kKeys_ControlsP8_Last)
+    return 2 + (cmd - kKeys_ControlsP3) / 12;
   return -1;
 }
 
@@ -291,7 +299,7 @@ void ConfigEnableRewindKeys(void);
  * default because it clears a resting stick on the pads players actually own
  * without eating a third of the throw, which 10000 (30%) did. */
 #define SNES_CONFIG_DEFAULT_DEADZONE 3277
-#define SNES_CONFIG_LEGACY_DEADZONE  10000
+#define SNES_CONFIG_LEGACY_DEADZONE 10000
 // Persist the launcher-editable settings back into `filename` (or config.ini)
 // with a surgical, comment-preserving in-place update. Called after the GUI
 // launcher returns PLAY.

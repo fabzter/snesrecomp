@@ -41,12 +41,10 @@
 #include "host_clock.h"
 #include "host_main.h"
 
-#include "snes/ppu.h"
-#include "snes/hd_jobs.h"
-#include "snes/msu1.h"
 #include "audio_trace.h"
 #include "snes/apu.h"
 #include "snes/dsp.h"
+#include "snes/hd_jobs.h"
 #include "snes/msu1.h"
 #include "snes/ppu.h"
 #include "snes/snes.h"
@@ -131,7 +129,6 @@ static bool LoadResumeState(const char *path) {
 #endif
 
 #if defined(RECOMP_LAUNCHER)
-#include "recomp_launcher.h"   /* recomp_launcher_run_window() */
 #include "hd_host_mod.h"
 #include "launcher_profile.h" /* launcher_profile_apply("snes", &gi) */
 #include "launcher_video.h"
@@ -865,8 +862,9 @@ static void PreparePpuFrame(void) {
   PpuSetExtraSpace(g_ppu, (uint8)g_ws_extra);
   if (g_config.mode7.enabled && !g_game->hd_frame &&
       g_config.output_method == kOutputMethod_OpenGL) {
-    if (!g_hd_capture) g_hd_capture = SnesHdCaptureCreate();
-    SnesHdCaptureSetSampling(g_hd_capture,g_config.mode7.supersample);
+    if (!g_hd_capture)
+      g_hd_capture = SnesHdCaptureCreate();
+    SnesHdCaptureSetSampling(g_hd_capture, g_config.mode7.supersample);
     SnesHdCaptureBind(g_hd_capture, g_ppu, (unsigned)fh);
   } else if (g_hd_capture) {
     SnesHdCaptureBind(g_hd_capture, NULL, 0);
@@ -889,7 +887,7 @@ typedef struct {
   int cond_waited;
   char *dump_tag;      // dump <tag>
   uint32 host_command; // optional zero-frame presentation command
-  bool save_state;   // loadstate entry instead saves, without opening a modal UI
+  bool save_state; // loadstate entry instead saves, without opening a modal UI
 } ScriptEntry;
 
 /* Entry kinds carried in the high bits of ScriptEntry.mask. The zero-frame
@@ -1309,41 +1307,43 @@ static uint32 TickScript(void) {
       continue; // zero-frame: the next command starts at this boundary
     }
 
-  if (g_script_phase == 0) {
-    if (g_script_counter > 0) {
-      g_script_counter--;
-      if (e->mask & kScriptLoadState) {
-        RtlSaveLoad(e->save_state ? kSaveLoad_Save : kSaveLoad_Load, e->mask & 0xF);
-        if (!e->save_state) GameReset();
-        return 0;
+    if (g_script_phase == 0) {
+      if (g_script_counter > 0) {
+        g_script_counter--;
+        if (e->mask & kScriptLoadState) {
+          RtlSaveLoad(e->save_state ? kSaveLoad_Save : kSaveLoad_Load,
+                      e->mask & 0xF);
+          if (!e->save_state)
+            GameReset();
+          return 0;
+        }
+        if (e->mask & kScriptReset) {
+          ConsoleReset();
+          return 0;
+        }
+        if (e->mask & kScriptPoke) {
+          if (e->poke_bytes && e->poke_count > 0 &&
+              e->poke_addr + (uint32)e->poke_count <= 0x20000u)
+            memcpy(g_ram + e->poke_addr, e->poke_bytes, (size_t)e->poke_count);
+          return 0;
+        }
+        if (e->mask & kScriptForcePoke) {
+          if (e->poke_bytes && e->poke_count > 0)
+            AddScriptForcePoke(e->poke_addr, e->poke_bytes, e->poke_count);
+          return 0;
+        }
+        return e->mask;
       }
-      if (e->mask & kScriptReset) {
-        ConsoleReset();
-        return 0;
+      // hold done — advance
+      g_script_index++;
+      if (g_script_index < g_script_count) {
+        e = &g_script_entries[g_script_index];
+        g_script_phase = 1;
+        g_script_counter = e->wait_frames;
       }
-      if (e->mask & kScriptPoke) {
-        if (e->poke_bytes && e->poke_count > 0 &&
-            e->poke_addr + (uint32)e->poke_count <= 0x20000u)
-          memcpy(g_ram + e->poke_addr, e->poke_bytes, (size_t)e->poke_count);
-        return 0;
-      }
-      if (e->mask & kScriptForcePoke) {
-        if (e->poke_bytes && e->poke_count > 0)
-          AddScriptForcePoke(e->poke_addr, e->poke_bytes, e->poke_count);
-        return 0;
-      }
-      return e->mask;
-    }
-    // hold done — advance
-    g_script_index++;
-    if (g_script_index < g_script_count) {
-      e = &g_script_entries[g_script_index];
-      g_script_phase = 1;
-      g_script_counter = e->wait_frames;
+      return 0;
     }
     return 0;
-  }
-  return 0;
   }
 }
 
@@ -1558,7 +1558,8 @@ static void NoteStateFrame(void) {
 
 void RtlDrawPpuFrame(uint8 *pixel_buffer, size_t pitch, uint32 render_flags) {
   (void)render_flags;
-  if (!pixel_buffer) return;
+  if (!pixel_buffer)
+    return;
   g_custom_frame = false;
   if (g_game->draw_frame &&
       g_game->draw_frame(pixel_buffer, pitch, g_my_pixels, g_snes_width,
@@ -1585,34 +1586,41 @@ void RtlDrawPpuFrame(uint8 *pixel_buffer, size_t pitch, uint32 render_flags) {
  * presenter speaks. */
 static void HdOsdRect(const uint32_t *src, int sw, int sh, int dx, int dy,
                       int w, int h, int dw, int dh) {
-  if (!g_hd_osd_active || !src || w <= 0 || h <= 0) return;
-  for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
-    if (x + dx < 0 || x + dx >= dw || y + dy < 0 || y + dy >= dh) continue;
-    uint32_t s = src[(size_t)(y * sh / h) * sw + x * sw / w];
-    unsigned a = s >> 24, na = 255 - a;
-    uint32_t *d = &g_hd_osd[(size_t)(y + dy) * dw + x + dx];
-    unsigned oa = a + (*d >> 24) * na / 255;
-    uint32_t result = oa << 24;
-    for (unsigned b = 0; b < 24; b += 8)
-      result |= ((((s >> b) & 255) * a + ((*d >> b) & 255) * na) / 255) << b;
-    *d = result;
-  }
+  if (!g_hd_osd_active || !src || w <= 0 || h <= 0)
+    return;
+  for (int y = 0; y < h; ++y)
+    for (int x = 0; x < w; ++x) {
+      if (x + dx < 0 || x + dx >= dw || y + dy < 0 || y + dy >= dh)
+        continue;
+      uint32_t s = src[(size_t)(y * sh / h) * sw + x * sw / w];
+      unsigned a = s >> 24, na = 255 - a;
+      uint32_t *d = &g_hd_osd[(size_t)(y + dy) * dw + x + dx];
+      unsigned oa = a + (*d >> 24) * na / 255;
+      uint32_t result = oa << 24;
+      for (unsigned b = 0; b < 24; b += 8)
+        result |= ((((s >> b) & 255) * a + ((*d >> b) & 255) * na) / 255) << b;
+      *d = result;
+    }
 }
-static void ComposeOsd(uint8 *dst, int pitch, int dst_w, int dst_h, int scale_div) {
+static void ComposeOsd(uint8 *dst, int pitch, int dst_w, int dst_h,
+                       int scale_div) {
   const uint32_t *px = NULL;
   int w = 0, h = 0;
   if (snes_osd_image(&px, &w, &h) && px && w > 0 && h > 0) {
-    snes_ovl_blit_panel_rect(dst, pitch, dst_w, dst_h, px, w, h,
-                             4 / scale_div, 4 / scale_div, w / scale_div, h / scale_div);
-    HdOsdRect(px, w, h, 4 / scale_div, 4 / scale_div, w / scale_div, h / scale_div, dst_w, dst_h);
+    snes_ovl_blit_panel_rect(dst, pitch, dst_w, dst_h, px, w, h, 4 / scale_div,
+                             4 / scale_div, w / scale_div, h / scale_div);
+    HdOsdRect(px, w, h, 4 / scale_div, 4 / scale_div, w / scale_div,
+              h / scale_div, dst_w, dst_h);
   }
   /* The volume bar sits at the right edge, vertically centred, while the
    * volume was just changed. */
   if (snes_osd_volume_image(&px, &w, &h) && px && w > 0 && h > 0) {
     const int bw = w / scale_div, bh = h / scale_div;
     snes_ovl_blit_panel_rect(dst, pitch, dst_w, dst_h, px, w, h,
-                             dst_w - bw - 4 / scale_div, (dst_h - bh) / 2, bw, bh);
-    HdOsdRect(px, w, h, dst_w - bw - 4 / scale_div, (dst_h - bh) / 2, bw, bh, dst_w, dst_h);
+                             dst_w - bw - 4 / scale_div, (dst_h - bh) / 2, bw,
+                             bh);
+    HdOsdRect(px, w, h, dst_w - bw - 4 / scale_div, (dst_h - bh) / 2, bw, bh,
+              dst_w, dst_h);
   }
   snes_osd_present_done();
 }
@@ -1773,19 +1781,27 @@ static void DrawPpuFrameWithPerf(void) {
   const SnesHdFrame *hd = NULL;
   SnesHdView hd_view;
   if (g_config.mode7.enabled && !g_config.frame_blend) {
-    hd = g_game->hd_frame ? g_game->hd_frame() :
-         !g_custom_frame ? SnesHdCaptureFrame(g_hd_capture) : NULL;
+    hd = g_game->hd_frame  ? g_game->hd_frame()
+         : !g_custom_frame ? SnesHdCaptureFrame(g_hd_capture)
+                           : NULL;
   }
   g_hd_osd_active = hd && SnesHdFrameView(hd, &hd_view) &&
-      hd_view.width == (unsigned)g_snes_width && hd_view.height == (unsigned)g_snes_height;
-  if (g_hd_osd_active && (size_t)hd_view.width * hd_view.height > g_hd_osd_capacity) {
+                    hd_view.width == (unsigned)g_snes_width &&
+                    hd_view.height == (unsigned)g_snes_height;
+  if (g_hd_osd_active &&
+      (size_t)hd_view.width * hd_view.height > g_hd_osd_capacity) {
     size_t count = (size_t)hd_view.width * hd_view.height;
     uint32_t *resized = realloc(g_hd_osd, count * 4);
-    if (resized) { g_hd_osd = resized; g_hd_osd_capacity = count; }
-    else g_hd_osd_active = false;
+    if (resized) {
+      g_hd_osd = resized;
+      g_hd_osd_capacity = count;
+    } else
+      g_hd_osd_active = false;
   }
-  if (g_hd_osd_active) for (unsigned y = 0; y < hd_view.height; ++y)
-    memcpy(g_hd_osd + y * hd_view.width, hd_view.lines[y].overlay, hd_view.width * 4);
+  if (g_hd_osd_active)
+    for (unsigned y = 0; y < hd_view.height; ++y)
+      memcpy(g_hd_osd + y * hd_view.width, hd_view.lines[y].overlay,
+             hd_view.width * 4);
   ComposeOsd(pixel_buffer, pitch, g_snes_width * render_scale,
              g_snes_height * render_scale, 2);
 #ifndef __ANDROID__
@@ -1827,8 +1843,8 @@ static void DrawPpuFrameWithPerf(void) {
       snprintf(pp, sizeof(pp),
                "screenshots/present_%04d%02d%02d_%02d%02d%02d.ppm",
                lt ? lt->tm_year + 1900 : 0, lt ? lt->tm_mon + 1 : 0,
-               lt ? lt->tm_mday : 0, lt ? lt->tm_hour : 0,
-               lt ? lt->tm_min : 0, lt ? lt->tm_sec : 0);
+               lt ? lt->tm_mday : 0, lt ? lt->tm_hour : 0, lt ? lt->tm_min : 0,
+               lt ? lt->tm_sec : 0);
       WritePpm(pp, pixel_buffer, pitch, g_snes_width * render_scale,
                g_snes_height * render_scale, g_present_frame, true);
     }
@@ -3370,6 +3386,7 @@ static void LauncherSeed(RecompLauncherCSettings *ls,
   ls->ignore_aspect = g_config.ignore_aspect_ratio;
   ls->linear_filter = g_config.linear_filtering;
   ls->aspect_index = SnesDisplayAspect_Clamp(g_config.display_aspect);
+  ls->window_ratio_index = g_config.window_ratio;
   /* Widescreen is a per-game capability (main.c's widescreen_supported): a
    * title that leaves it 0 keeps a dormant 0 here even if a stray INI key
    * activated the hidden g_config field. */
@@ -3529,6 +3546,7 @@ static void LauncherCommit(const RecompLauncherCSettings *ls,
   g_config.linear_filtering = ls->linear_filter != 0;
   if (game->display_aspect_supported)
     g_config.display_aspect = (uint8)SnesDisplayAspect_Clamp(ls->aspect_index);
+  g_config.window_ratio = (uint8)ls->window_ratio_index;
   /* Only a title that opted in honors the toggle; geometry re-reads
    * g_config.widescreen every frame, so the change is live without a
    * reconfigure call. */
@@ -3615,6 +3633,7 @@ static void ApplyLiveSettings(const Config *before) {
   if (!custom_size && !(g_win_flags & fs_mask) &&
       (g_config.window_scale != before->window_scale ||
        g_config.display_aspect != before->display_aspect ||
+       g_config.window_ratio != before->window_ratio ||
        g_config.fullscreen != before->fullscreen)) {
     if (g_config.window_scale)
       g_current_window_scale = IntMin(g_config.window_scale, kMaxWindowScale);
@@ -4395,7 +4414,8 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
   RendererApply(RendererChoice());
 #ifndef __ANDROID__
   if (g_config.output_method == kOutputMethod_OpenGL) {
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
+                        SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     g_win_flags |= SDL_WINDOW_OPENGL;
@@ -4518,10 +4538,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
     g_win_flags &= ~SDL_WINDOW_OPENGL;
     g_config.output_method = kOutputMethod_SDL;
     g_renderer_funcs = kSdlRendererFuncs;
-    window = snesrecomp_sdl_create_window(g_window_title, window_width, window_height, g_win_flags);
+    window = snesrecomp_sdl_create_window(g_window_title, window_width,
+                                          window_height, g_win_flags);
   }
 #endif
-  if(window == NULL) {
+  if (window == NULL) {
     host_report_breadcrumb("SDL_CreateWindow FAILED: %s", SDL_GetError());
     printf("Failed to create window: %s\n", SDL_GetError());
     return 1;
@@ -4537,18 +4558,20 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
       host_report_breadcrumb("desktop GL unavailable; native SDL presentation");
       SDL_DestroyWindow(window);
       g_win_flags &= ~SDL_WINDOW_OPENGL;
-      window = snesrecomp_sdl_create_window(g_window_title, window_width, window_height, g_win_flags);
+      window = snesrecomp_sdl_create_window(g_window_title, window_width,
+                                            window_height, g_win_flags);
       g_window = window;
       g_config.output_method = kOutputMethod_SDL;
       g_renderer_funcs = kSdlRendererFuncs;
-      if (!window || !g_renderer_funcs.Initialize(window)) return 1;
+      if (!window || !g_renderer_funcs.Initialize(window))
+        return 1;
       SDL_SetWindowHitTest(window, HitTestCallback, NULL);
     } else
 #endif
     {
-    host_report_breadcrumb("renderer init FAILED (output_method=%d)",
-                           g_config.output_method);
-    return 1;
+      host_report_breadcrumb("renderer init FAILED (output_method=%d)",
+                             g_config.output_method);
+      return 1;
     }
   }
   host_report_breadcrumb(
@@ -5380,8 +5403,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
   free(g_audiobuffer);
 
   g_renderer_funcs.Destroy();
-  SnesHdCaptureDestroy(g_hd_capture); g_hd_capture = NULL;
-  free(g_hd_osd); g_hd_osd = NULL; g_hd_osd_capacity = 0;
+  SnesHdCaptureDestroy(g_hd_capture);
+  g_hd_capture = NULL;
+  free(g_hd_osd);
+  g_hd_osd = NULL;
+  g_hd_osd_capacity = 0;
 
   SDL_DestroyWindow(window);
   SDL_Quit();
@@ -5654,7 +5680,10 @@ static void RequestScreenshot(void) {
  * ran (frozen menus, launcher) are absent from both sides, so counters
  * stay aligned. Hotkey-driven freezes (rewind, save browser) diverge a
  * replay by design; recording sessions should avoid them. */
-typedef struct InputReplayRow { uint32 frame; uint32 mask; } InputReplayRow;
+typedef struct InputReplayRow {
+  uint32 frame;
+  uint32 mask;
+} InputReplayRow;
 static FILE *s_input_log;
 static InputReplayRow *s_rep_rows;
 static size_t s_rep_n, s_rep_cap, s_rep_cursor;
@@ -5675,7 +5704,7 @@ static void InputLogOpen(void) {
     path[0] = '\0';
   }
   if (rec) {
-  FILE *probe = fopen(path, "rb");
+    FILE *probe = fopen(path, "rb");
     if (probe) {
       fseek(probe, 0, SEEK_END);
       long sz = ftell(probe);
@@ -5740,12 +5769,11 @@ static void InputLogOpen(void) {
     s_rep_rows = rows;
     s_rep_n = n;
     s_rep_active = true;
-    fprintf(stderr, "[input-replay] %zu rows from session %d of %s\n", n,
-            want, rep);
+    fprintf(stderr, "[input-replay] %zu rows from session %d of %s\n", n, want,
+            rep);
   } else {
     free(rows);
-    fprintf(stderr, "[input-replay] no rows for session %d in %s\n", want,
-            rep);
+    fprintf(stderr, "[input-replay] no rows for session %d in %s\n", want, rep);
   }
 }
 
