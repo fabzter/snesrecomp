@@ -220,6 +220,8 @@ static void ApplyVolume(void);
  * and the launcher opens on what the player left. One flag covers every
  * persistable setting; volume used to keep its own copy of the same bit. */
 bool g_config_dirty;
+static bool g_want_present_ppm;
+void MkDir(const char *s);
 static void HandleGamepadAxisInput(GamepadInfo *gi, int axis, Sint16 value);
 static int RemapSdlButton(int button);
 static void HandleGamepadInput(GamepadInfo *gi, int button, bool pressed);
@@ -1812,6 +1814,21 @@ static void DrawPpuFrameWithPerf(void) {
       WritePpm(path, pixel_buffer, pitch, g_snes_width * render_scale,
                g_snes_height * render_scale, g_present_frame, true);
       shot_done = 1;
+    }
+    if (g_want_present_ppm) {
+      g_want_present_ppm = false;
+      char pp[256];
+      time_t tc = time(NULL);
+      struct tm tmv;
+      struct tm *lt = localtime_r(&tc, &tmv);
+      MkDir("screenshots");
+      snprintf(pp, sizeof(pp),
+               "screenshots/present_%04d%02d%02d_%02d%02d%02d.ppm",
+               lt ? lt->tm_year + 1900 : 0, lt ? lt->tm_mon + 1 : 0,
+               lt ? lt->tm_mday : 0, lt ? lt->tm_hour : 0,
+               lt ? lt->tm_min : 0, lt ? lt->tm_sec : 0);
+      WritePpm(pp, pixel_buffer, pitch, g_snes_width * render_scale,
+               g_snes_height * render_scale, g_present_frame, true);
     }
   }
   /* SNESRECOMP_SCREENSHOT_DIR=<dir> [SNESRECOMP_SCREENSHOT_FROM=<a>]
@@ -5605,6 +5622,10 @@ static void RequestScreenshot(void) {
   if (now - s_last_screenshot_time < 0.5)
     return;
   s_last_screenshot_time = now;
+  /* The OpenGL BMP reads the composited (shader) framebuffer, which some
+   * preset paths mis-scale; always pair it with the pre-shader presented
+   * field so a glitch report carries a clean wide frame regardless. */
+  g_want_present_ppm = true;
 
 #ifdef __ANDROID__
   fprintf(stderr, "Screenshots require the desktop OpenGL backend.\n");
