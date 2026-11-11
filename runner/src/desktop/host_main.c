@@ -5645,9 +5645,10 @@ static void RequestScreenshot(void) {
 }
 
 /* ── Input record / replay ───────────────────────────────────────────────
- * Every simulated frame's seat bits are appended to ws_input_log.csv
- * beside the executable (session-marked, rotated at 32 MiB) so a player
- * report can be reproduced frame-exactly: SNESRECOMP_INPUT_REPLAY=<file>
+ * With SNESRECOMP_INPUT_RECORD[=path] set, every simulated frame's seat
+ * bits are appended to ws_input_log.csv beside the executable (or the
+ * given path), session-marked and rotated at 32 MiB, so a player report
+ * can be reproduced frame-exactly: SNESRECOMP_INPUT_REPLAY=<file>
  * [SNESRECOMP_REPLAY_SESSION=<n>, default last] replaces the seat bits
  * from the log instead of reading human input. Frames the guest never
  * ran (frozen menus, launcher) are absent from both sides, so counters
@@ -5660,27 +5661,39 @@ static size_t s_rep_n, s_rep_cap, s_rep_cursor;
 static bool s_rep_active;
 
 static void InputLogOpen(void) {
+  /* Opt-in: SNESRECOMP_INPUT_RECORD[=path] enables recording (default path
+   * beside the executable). Ordinary launches record nothing. */
+  const char *rec = getenv("SNESRECOMP_INPUT_RECORD");
   char path[1024];
-  if (!snesrecomp_exe_dir_path("ws_input_log.csv", path, sizeof(path)))
-    snprintf(path, sizeof(path), "ws_input_log.csv");
-  FILE *probe = fopen(path, "rb");
-  if (probe) {
-    fseek(probe, 0, SEEK_END);
-    long sz = ftell(probe);
-    fclose(probe);
-    if (sz > 32l * 1024l * 1024l) {
-      char old[1100];
-      snprintf(old, sizeof(old), "%s.1", path);
-      remove(old);
-      rename(path, old);
-    }
+  if (rec && rec[0] && rec[0] != '0' && strchr(rec, '/')) {
+    snprintf(path, sizeof(path), "%s", rec);
+  } else if (rec && rec[0] != '0') {
+    if (!snesrecomp_exe_dir_path("ws_input_log.csv", path, sizeof(path)))
+      snprintf(path, sizeof(path), "ws_input_log.csv");
+  } else {
+    rec = NULL;
+    path[0] = '\0';
   }
-  s_input_log = fopen(path, "a");
-  if (s_input_log) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    fprintf(s_input_log, "# session wall_ms=%lld\n",
-            (long long)(ts.tv_sec * 1000ll + ts.tv_nsec / 1000000));
+  if (rec) {
+  FILE *probe = fopen(path, "rb");
+    if (probe) {
+      fseek(probe, 0, SEEK_END);
+      long sz = ftell(probe);
+      fclose(probe);
+      if (sz > 32l * 1024l * 1024l) {
+        char old[1100];
+        snprintf(old, sizeof(old), "%s.1", path);
+        remove(old);
+        rename(path, old);
+      }
+    }
+    s_input_log = fopen(path, "a");
+    if (s_input_log) {
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      fprintf(s_input_log, "# session wall_ms=%lld\n",
+              (long long)(ts.tv_sec * 1000ll + ts.tv_nsec / 1000000));
+    }
   }
   const char *rep = getenv("SNESRECOMP_INPUT_REPLAY");
   if (!rep || !rep[0])
