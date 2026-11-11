@@ -24,6 +24,8 @@ void snesrecomp_opengl_set_viewport(void (*compute)(int, int, int, int,
 
 /* Capture the next fully composited OpenGL frame to screenshots/*.bmp. */
 void OpenGLRenderer_RequestScreenshot(void);
+/* Optional sidecar writer (path of the bmp just written). */
+void snesrecomp_opengl_set_screenshot_sidecar(void (*fn)(const char *path));
 
 #ifdef __cplusplus
 }

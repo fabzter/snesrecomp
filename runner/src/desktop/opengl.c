@@ -70,6 +70,12 @@ void snesrecomp_opengl_set_hd(const SnesHdFrame *frame,
   g_hd_frame = frame; g_hd_overlay = overlay; g_hd_overlay_pitch = pitch;
 }
 static bool g_want_screenshot;
+/* Optional title telemetry: written beside each hotkey screenshot so a
+ * player-reported frame can be correlated with exact guest state. */
+static void (*s_shot_sidecar)(const char *path);
+void snesrecomp_opengl_set_screenshot_sidecar(void (*fn)(const char *)) {
+  s_shot_sidecar = fn;
+}
 static double g_screenshot_flash_start_time = -1.0;
 static const double kScreenshotFlashSeconds = 0.15;
 
@@ -368,6 +374,7 @@ static void SaveScreenshotBmp(int width, int height) {
     fwrite(pixels, 1, pixel_size, f);
     fclose(f);
     printf("Screenshot saved: %s\n", path);
+    if (s_shot_sidecar) s_shot_sidecar(path);
     g_screenshot_flash_start_time = MonotonicSeconds();
   } else {
     fprintf(stderr, "Screenshot: couldn't open '%s' for writing\n", path);
