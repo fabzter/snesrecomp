@@ -451,6 +451,14 @@ if(SNESRECOMP_ENABLE_TRACE)
         )
     endif()
 endif()
+option(SNESRECOMP_ENABLE_VIDEO_CAPTURE
+    "Debug-only gameplay video recorder (ffmpeg child process)" OFF)
+if(SNESRECOMP_ENABLE_VIDEO_CAPTURE)
+    add_compile_definitions(SNESRECOMP_VIDEO_CAPTURE=1)
+    list(APPEND SNESRECOMP_RUNNER_SOURCES
+        ${SNESRECOMP_RUNNER_ROOT}/src/desktop/video_rec.c)
+endif()
+
 
 # Schema-driven mod packages and trusted static plugins. This is deliberately
 # opt-in: ordinary games do not compile the loader, expose a Mods navigation

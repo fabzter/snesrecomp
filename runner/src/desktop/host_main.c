@@ -11,6 +11,8 @@
  * where this file differs from that main.c the comment says why.
  */
 #include <assert.h>
+#include <errno.h>
+
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -115,6 +117,8 @@ static bool LoadResumeState(const char *path) {
 #include "post_mortem.h"
 #include "snes/tier2_capture.h"
 #include "snes_osd.h"
+#include "video_rec.h"
+
 #include "snes_overlay_draw.h"
 #include "snes_rewind.h"
 #include "snes_runahead.h"
@@ -123,6 +127,15 @@ static bool LoadResumeState(const char *path) {
 #include "state_dump.h"
 #include "util.h"
 #include "widescreen.h"
+
+#if SNESRECOMP_VIDEO_CAPTURE
+void VideoRecHostMeta(int *run_ahead, int *frame_blend) {
+  if (run_ahead)
+    *run_ahead = g_config.run_ahead;
+  if (frame_blend)
+    *frame_blend = g_config.frame_blend ? 1 : 0;
+}
+#endif
 
 #if SNESRECOMP_ENABLE_MODS
 #include "mod_runtime.h"
@@ -1850,6 +1863,10 @@ static void DrawPpuFrameWithPerf(void) {
                g_snes_height * render_scale, g_present_frame, true);
     }
   }
+  VideoRecPresent(pixel_buffer, pitch, g_snes_width * render_scale,
+                  g_snes_height * render_scale,
+                  snes_frame_counter ? snes_frame_counter - 1 : 0);
+
   /* SNESRECOMP_SCREENSHOT_DIR=<dir> [SNESRECOMP_SCREENSHOT_FROM=<a>]
    * [SNESRECOMP_SCREENSHOT_TO=<b>]: every PRESENT while the simulated frame
    * is in a..b, as <dir>/present_NNNNNN.ppm, plus <dir>/presents.csv listing
@@ -2110,6 +2127,7 @@ typedef struct PadGesture {
 } PadGesture;
 static PadGesture g_rewind_gesture;
 static PadGesture g_launcher_gesture;
+static PadGesture g_record_gesture;
 
 /* Lower-cased `spec` into bits; returns the number of buttons, or -1 when a
  * name is not a button. */
@@ -2197,6 +2215,29 @@ static void PadGestureConfigure(PadGesture *g, const char *configured,
   }
   g->ok = true;
 }
+
+#if SNESRECOMP_VIDEO_CAPTURE
+static bool ParseVideoAutotestFrames(const char *text, unsigned *start_frame,
+                                     unsigned *stop_frame) {
+  if (!text || !text[0])
+    return false;
+  char *comma = NULL;
+  errno = 0;
+  unsigned long start = strtoul(text, &comma, 10);
+  if (errno == ERANGE || comma == text || *comma != ',' || start > UINT_MAX)
+    return false;
+  const char *stop_text = comma + 1;
+  char *end = NULL;
+  errno = 0;
+  unsigned long stop = strtoul(stop_text, &end, 10);
+  if (errno == ERANGE || end == stop_text || *end || stop > UINT_MAX ||
+      stop <= start)
+    return false;
+  *start_frame = (unsigned)start;
+  *stop_frame = (unsigned)stop;
+  return true;
+}
+#endif
 
 /* Edge-triggered: true on the frame the whole gesture becomes held. */
 static bool PadGesturePressed(PadGesture *g) {
@@ -4054,6 +4095,11 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
                            "paths with non-ASCII characters may fail",
                            (unsigned)GetACP());
 #endif
+  VideoRecConfigure();
+  if (VideoRecAvailable())
+    PadGestureConfigure(&g_record_gesture, g_config.record_gesture, "L3+R3",
+                        "record", "RecordGesture");
+
   PadGestureConfigure(&g_rewind_gesture, g_config.rewind_gesture, "Select+R3",
                       "rewind", "RewindGesture");
   if (game->in_game_launcher)
@@ -4704,6 +4750,14 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
   bool running = true;
   const char *exit_reason = "loop ended";
   uint32 frameCtr = 0;
+#if SNESRECOMP_VIDEO_CAPTURE
+  unsigned video_autotest_start = 0;
+  unsigned video_autotest_stop = 0;
+  const bool video_autotest_enabled =
+      ParseVideoAutotestFrames(HostGetenv("VIDEO_AUTOTEST"),
+                               &video_autotest_start, &video_autotest_stop);
+#endif
+
   /* Run-ahead rasterises the speculated frame itself; it needs the number the
    * iteration is about to reach, which is this counter plus one. */
   snes_runahead_set_capture(&RunaheadCapture, &frameCtr);
@@ -5166,6 +5220,10 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
       continue; /* guest was frozen: no frame to run or present */
     }
     g_open_launcher_hotkey = 0;
+    if (VideoRecAvailable() && PadGesturePressed(&g_record_gesture) &&
+        !snes_rewind_is_open() && !snes_savestate_menu_is_open())
+      VideoRecToggle();
+
     if ((g_rewind_hotkey || PadGesturePressed(&g_rewind_gesture)) &&
         !snes_rewind_is_open() && !snes_savestate_menu_is_open()) {
       /* Refused during netplay by snes_rewind_open() itself: one machine
@@ -5269,6 +5327,13 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
      * inert. */
     if (!runahead_captured)
       CaptureSimulationFrame(frameCtr);
+#if SNESRECOMP_VIDEO_CAPTURE
+    if (video_autotest_enabled) {
+      if (frameCtr == video_autotest_start || frameCtr == video_autotest_stop)
+        VideoRecToggle();
+    }
+#endif
+
     NoteStateFrame();
     g_audio_producer_active = false;
     ProfileEnd(kProfileRaster, profile_start);
@@ -5382,6 +5447,8 @@ int snesrecomp_desktop_main(const SnesDesktopHostGame *game, int argc,
   snes_host_lobby_shutdown();
 #endif
   snes_rewind_shutdown();
+  VideoRecShutdown();
+
   snes_runahead_shutdown();
 #if defined(SNESRECOMP_HOST_HAS_BLEND)
   if (g_blend)

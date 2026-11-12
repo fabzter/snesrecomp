@@ -139,6 +139,8 @@ typedef struct Config {
   /* [Controller] LauncherGesture: the same syntax, opening the launcher
    * mid-game for a host that offers it (default "Select+L3"). */
   char launcher_gesture[64];
+  /* [Controller] RecordGesture: pad buttons joined with '+', or "none". */
+  char record_gesture[64];
 
   /* Presentation and emulation options the desktop host offers through the
    * launcher's Display page, persisted by WriteConfigFile:

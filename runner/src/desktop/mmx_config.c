@@ -616,6 +616,9 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     } else if (StringEqualsNoCase(key, "LauncherGesture")) {
       snprintf(g_config.launcher_gesture, sizeof(g_config.launcher_gesture),
                "%s", value);
+    } else if (StringEqualsNoCase(key, "RecordGesture")) {
+      snprintf(g_config.record_gesture, sizeof(g_config.record_gesture), "%s",
+               value);
       return true;
     } else if (StringStartsWithNoCase(key, "SourceP") && key[7] >= '1' &&
                key[7] < '1' + kSnesHostPadSeats && !key[8]) {
@@ -1094,6 +1097,7 @@ void WriteConfigFile(const char *filename) {
       {"Controller", "SourceP7"},
       {"GamepadMap", "EnableGamepad8"},
       {"Controller", "SourceP8"},
+      {"Controller", "RecordGesture"},
       {"Rewind", "Enabled"},
       {"Rewind", "Depth"},
       {"Rewind", "Interval"},
@@ -1164,6 +1168,12 @@ void WriteConfigFile(const char *filename) {
       CfgSkip(kvs, N, "Controller", src);
     }
   }
+  if (g_config.record_gesture[0])
+    CfgSet(kvs, N, "Controller", "RecordGesture", "%s",
+           g_config.record_gesture);
+  else
+    CfgSkip(kvs, N, "Controller", "RecordGesture");
+
   if (s_rewind_keys) {
     CfgSet(kvs, N, "Rewind", "Enabled", "%d", g_config.rewind_enabled ? 1 : 0);
     CfgSet(kvs, N, "Rewind", "Depth", "%d", g_config.rewind_depth);
