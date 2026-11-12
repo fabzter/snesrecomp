@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
@@ -17,10 +19,12 @@
 #  include <direct.h>
 #  define snesrecomp_chdir _chdir
 #  define snesrecomp_getcwd _getcwd
+#  define snesrecomp_mkdir _mkdir
 #else
 #  include <unistd.h>
 #  define snesrecomp_chdir chdir
 #  define snesrecomp_getcwd getcwd
+#  define snesrecomp_mkdir(path) mkdir(path, 0755)
 #endif
 #ifdef __APPLE__
 #  include <mach-o/dyld.h>
@@ -174,3 +178,192 @@ int snesrecomp_anchor_to_exe_dir(void) {
     fprintf(stderr, "[Launcher] Config/saves anchored to '%s'.\n", dir);
     return 1;
 }
+
+/* SNESRECOMP_ARTIFACT_DIR is cached so an artifact path cannot change during
+ * a run if the process environment is modified after startup. */
+static int s_artifact_dir_cached;
+static int s_artifact_dir_from_env;
+static int s_artifact_dir_valid = 1;
+static char s_artifact_dir_cache[1024];
+
+static int is_path_separator(char c) {
+    return c == '/' || c == '\\';
+}
+
+static void cache_artifact_dir(void) {
+    if (s_artifact_dir_cached)
+        return;
+    s_artifact_dir_cached = 1;
+
+    const char *configured = getenv("SNESRECOMP_ARTIFACT_DIR");
+    if (!configured || !configured[0])
+        return;
+
+    s_artifact_dir_from_env = 1;
+    if (!snesrecomp_abspath(configured, s_artifact_dir_cache,
+                            sizeof(s_artifact_dir_cache))) {
+        s_artifact_dir_valid = 0;
+        return;
+    }
+
+    size_t len = strlen(s_artifact_dir_cache);
+    while (len > 1 && is_path_separator(s_artifact_dir_cache[len - 1])) {
+#ifdef _WIN32
+        if (len == 3 && s_artifact_dir_cache[1] == ':')
+            break;
+#endif
+        s_artifact_dir_cache[--len] = '\0';
+    }
+}
+
+static int make_dir_component(const char *path) {
+    if (snesrecomp_mkdir(path) == 0)
+        return 1;
+    return errno == EEXIST;
+}
+
+/* Create every directory component in a mutable path, ignoring EEXIST. */
+static int make_dirs(char *path) {
+    if (!path || !path[0])
+        return 0;
+
+    char *component = path;
+#ifdef _WIN32
+    if (path[0] && path[1] == ':') {
+        component = path + 2;
+        if (is_path_separator(*component))
+            component++;
+    } else if (is_path_separator(path[0]) &&
+               is_path_separator(path[1])) {
+        component = path + 2; /* UNC server/share paths. */
+    } else if (is_path_separator(path[0])) {
+        component = path + 1;
+    }
+#else
+    if (is_path_separator(path[0]))
+        component = path + 1;
+#endif
+
+    for (char *p = component; *p; p++) {
+        if (!is_path_separator(*p) || p == path ||
+            is_path_separator(p[-1]))
+            continue;
+        char separator = *p;
+        *p = '\0';
+        int ok = make_dir_component(path);
+        *p = separator;
+        if (!ok)
+            return 0;
+    }
+
+    size_t len = strlen(path);
+    return is_path_separator(path[len - 1]) || make_dir_component(path);
+}
+
+static int ensure_parent_dirs(const char *path) {
+    size_t len = strlen(path);
+    char *parent = (char *)malloc(len + 1);
+    if (!parent)
+        return 0;
+    memcpy(parent, path, len + 1);
+
+    char *last_separator = NULL;
+    for (char *p = parent; *p; p++)
+        if (is_path_separator(*p))
+            last_separator = p;
+    if (!last_separator) {
+        free(parent);
+        return 1;
+    }
+
+    if (last_separator == parent) {
+        last_separator[1] = '\0';
+#ifdef _WIN32
+    } else if (last_separator == parent + 2 && parent[1] == ':') {
+        last_separator[1] = '\0';
+#endif
+    } else {
+        *last_separator = '\0';
+    }
+
+    int ok = make_dirs(parent);
+    free(parent);
+    return ok;
+}
+
+int snesrecomp_artifact_dir(char *out, size_t max_len) {
+    if (!out || max_len == 0)
+        return 0;
+    out[0] = '\0';
+
+    cache_artifact_dir();
+    if (!s_artifact_dir_valid)
+        return 0;
+
+    if (s_artifact_dir_from_env) {
+        size_t len = strlen(s_artifact_dir_cache);
+        if (len >= max_len)
+            return 0;
+        memcpy(out, s_artifact_dir_cache, len + 1);
+    } else if (!snesrecomp_exe_dir_path("", out, max_len)) {
+        return 0;
+    }
+
+    if (!make_dirs(out)) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+int snesrecomp_artifact_path(const char *leaf, char *out, size_t max_len) {
+    if (!leaf || !out || max_len == 0)
+        return 0;
+    out[0] = '\0';
+
+    cache_artifact_dir();
+    if (!s_artifact_dir_valid)
+        return 0;
+
+    if (!s_artifact_dir_from_env) {
+        if (!snesrecomp_exe_dir_path(leaf, out, max_len))
+            return 0;
+        if (!ensure_parent_dirs(out)) {
+            out[0] = '\0';
+            return 0;
+        }
+        return 1;
+    }
+
+    char dir[1024];
+    if (!snesrecomp_artifact_dir(dir, sizeof(dir)))
+        return 0;
+
+    size_t dir_len = strlen(dir);
+#ifdef _WIN32
+    const char separator = '\\';
+#else
+    const char separator = '/';
+#endif
+    int written = is_path_separator(dir[dir_len - 1])
+                      ? snprintf(out, max_len, "%s%s", dir, leaf)
+                      : snprintf(out, max_len, "%s%c%s", dir, separator, leaf);
+    if (written < 0 || (size_t)written >= max_len) {
+        out[0] = '\0';
+        return 0;
+    }
+    if (!ensure_parent_dirs(out)) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+#ifdef SNESRECOMP_ARTIFACT_PATH_TESTING
+void snesrecomp_artifact_path_reset(void) {
+    s_artifact_dir_cached = 0;
+    s_artifact_dir_from_env = 0;
+    s_artifact_dir_valid = 1;
+    s_artifact_dir_cache[0] = '\0';
+}
+#endif

@@ -1835,16 +1835,17 @@ static void DrawPpuFrameWithPerf(void) {
     }
     if (g_want_present_ppm) {
       g_want_present_ppm = false;
-      char pp[256];
+      char pp[1024], relative_path[128];
       time_t tc = time(NULL);
       struct tm tmv;
       struct tm *lt = localtime_r(&tc, &tmv);
-      MkDir("screenshots");
-      snprintf(pp, sizeof(pp),
+      snprintf(relative_path, sizeof(relative_path),
                "screenshots/present_%04d%02d%02d_%02d%02d%02d.ppm",
                lt ? lt->tm_year + 1900 : 0, lt ? lt->tm_mon + 1 : 0,
                lt ? lt->tm_mday : 0, lt ? lt->tm_hour : 0, lt ? lt->tm_min : 0,
                lt ? lt->tm_sec : 0);
+      if (!snesrecomp_artifact_path(relative_path, pp, sizeof(pp)))
+        snprintf(pp, sizeof(pp), "%s", relative_path);
       WritePpm(pp, pixel_buffer, pitch, g_snes_width * render_scale,
                g_snes_height * render_scale, g_present_frame, true);
     }
@@ -5697,7 +5698,7 @@ static void InputLogOpen(void) {
   if (rec && rec[0] && rec[0] != '0' && strchr(rec, '/')) {
     snprintf(path, sizeof(path), "%s", rec);
   } else if (rec && rec[0] != '0') {
-    if (!snesrecomp_exe_dir_path("ws_input_log.csv", path, sizeof(path)))
+    if (!snesrecomp_artifact_path("ws_input_log.csv", path, sizeof(path)))
       snprintf(path, sizeof(path), "ws_input_log.csv");
   } else {
     rec = NULL;

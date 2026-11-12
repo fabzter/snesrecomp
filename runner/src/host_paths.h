@@ -46,6 +46,21 @@ int snesrecomp_exe_basename(char *out, size_t max_len);
  */
 int snesrecomp_anchor_to_exe_dir(void);
 
+/*
+ * Resolve an artifact path. SNESRECOMP_ARTIFACT_DIR redirects artifacts when
+ * set; otherwise the path remains executable-directory relative. Parent
+ * directories are created as needed. Returns 1 on success.
+ */
+int snesrecomp_artifact_path(const char *leaf, char *out, size_t max_len);
+
+/* Return the ensured-to-exist artifact directory. Returns 1 on success. */
+int snesrecomp_artifact_dir(char *out, size_t max_len);
+
+#ifdef SNESRECOMP_ARTIFACT_PATH_TESTING
+/* Clear the cached environment value between isolated path-policy tests. */
+void snesrecomp_artifact_path_reset(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

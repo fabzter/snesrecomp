@@ -36,6 +36,7 @@
 
 #include "types.h"
 #include "util.h"
+#include "host_paths.h"
 #include "glsl_shader.h"
 #include "config.h"
 #include "display_aspect.h"
@@ -79,7 +80,6 @@ void snesrecomp_opengl_set_screenshot_sidecar(void (*fn)(const char *)) {
 static double g_screenshot_flash_start_time = -1.0;
 static const double kScreenshotFlashSeconds = 0.15;
 
-extern void MkDir(const char *s);
 
 /* -1 = decide from config at init. A host that paces presentation itself
  * (an FPS cap, a simulation/presentation split) sets 0 so the swap does not
@@ -327,8 +327,6 @@ static void SaveScreenshotBmp(int width, int height) {
 
   glReadPixels(0, 0, width, height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
 
-  MkDir("screenshots");
-
   time_t t = time(NULL);
   struct tm tm_snapshot;
   struct tm *local = localtime(&t);
@@ -337,12 +335,14 @@ static void SaveScreenshotBmp(int width, int height) {
   else
     memset(&tm_snapshot, 0, sizeof(tm_snapshot));
 
-  char path[256];
-  snprintf(path, sizeof(path),
+  char path[1024], relative_path[128];
+  snprintf(relative_path, sizeof(relative_path),
            "screenshots/screenshot_%04d%02d%02d_%02d%02d%02d.bmp",
            tm_snapshot.tm_year + 1900, tm_snapshot.tm_mon + 1,
            tm_snapshot.tm_mday, tm_snapshot.tm_hour, tm_snapshot.tm_min,
            tm_snapshot.tm_sec);
+  if (!snesrecomp_artifact_path(relative_path, path, sizeof(path)))
+    snprintf(path, sizeof(path), "%s", relative_path);
 
   FILE *f = fopen(path, "wb");
   if (f) {
