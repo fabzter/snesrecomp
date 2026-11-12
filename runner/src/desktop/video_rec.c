@@ -107,6 +107,9 @@ static void breadcrumb(const char *message) {
 static void push_unavailable_toast(void) {
   snes_osd_push("video recording unavailable: ffmpeg not found", 3000);
 }
+static void push_toggle_unavailable_toast(void) {
+  snes_osd_push("recording not started: ffmpeg unavailable", 3000);
+}
 
 /* Escape a path for a POSIX shell double-quoted word. */
 static int shell_double_quote(const char *value, char *out, size_t cap) {
@@ -511,6 +514,12 @@ static int begin_recording(void) {
 void VideoRecToggle(void) {
   if (s_active) {
     stop_recording(false, true);
+    return;
+  }
+  bool configured_before_toggle = s_configured;
+  if (!VideoRecAvailable()) {
+    if (configured_before_toggle)
+      push_toggle_unavailable_toast();
     return;
   }
   (void)begin_recording();
