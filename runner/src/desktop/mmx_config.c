@@ -616,6 +616,7 @@ static bool HandleIniConfig(int section, const char *key, char *value) {
     } else if (StringEqualsNoCase(key, "LauncherGesture")) {
       snprintf(g_config.launcher_gesture, sizeof(g_config.launcher_gesture),
                "%s", value);
+      return true;
     } else if (StringEqualsNoCase(key, "RecordGesture")) {
       snprintf(g_config.record_gesture, sizeof(g_config.record_gesture), "%s",
                value);
