@@ -326,8 +326,10 @@ int snesrecomp_artifact_path(const char *leaf, char *out, size_t max_len) {
         return 0;
 
     if (!s_artifact_dir_from_env) {
-        if (!snesrecomp_exe_dir_path(leaf, out, max_len))
+        if (!snesrecomp_exe_dir_path(leaf, out, max_len)) {
+            (void)ensure_parent_dirs(leaf);
             return 0;
+        }
         if (!ensure_parent_dirs(out)) {
             out[0] = '\0';
             return 0;

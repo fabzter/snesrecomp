@@ -5698,8 +5698,13 @@ static void InputLogOpen(void) {
   if (rec && rec[0] && rec[0] != '0' && strchr(rec, '/')) {
     snprintf(path, sizeof(path), "%s", rec);
   } else if (rec && rec[0] != '0') {
-    if (!snesrecomp_artifact_path("ws_input_log.csv", path, sizeof(path)))
+    if (rec[0] && strcmp(rec, "1") != 0) {
+      if (!snesrecomp_exe_dir_path(rec, path, sizeof(path)))
+        snprintf(path, sizeof(path), "%s", rec);
+    } else if (!snesrecomp_artifact_path("ws_input_log.csv", path,
+                                         sizeof(path))) {
       snprintf(path, sizeof(path), "ws_input_log.csv");
+    }
   } else {
     rec = NULL;
     path[0] = '\0';
